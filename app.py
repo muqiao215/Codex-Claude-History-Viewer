@@ -3,7 +3,9 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 from datetime import datetime, timezone, time as dt_time
@@ -52,6 +54,15 @@ def parse_date_param(value, end=False):
         dt = datetime.combine(date, dt_time(0, 0, 0))
     dt = dt.replace(tzinfo=local_tz)
     return int(dt.timestamp() * 1000)
+
+
+def slugify_path_label(value):
+    text = str(value or "").strip()
+    text = re.sub(r'[\\/:*?"<>|]+', "-", text)
+    text = re.sub(r"\s+", "-", text)
+    text = re.sub(r"-{2,}", "-", text)
+    text = text.strip("-.")
+    return text or "project"
 
 
 def extract_text(content_items):
@@ -689,6 +700,241 @@ def parse_claude_session_file(path: Path):
     }
 
 
+def _openclaw_format_tool_use(item):
+    if not isinstance(item, dict):
+        return None
+    name = item.get("name") or "tool"
+    call_id = item.get("id")
+    arguments = item.get("arguments")
+    if arguments is None:
+        raw_input = None
+    elif isinstance(arguments, str):
+        raw_input = arguments
+    else:
+        raw_input = json.dumps(arguments, ensure_ascii=False)
+    return _codex_format_tool_use(name, call_id=call_id, raw_input=raw_input)
+
+
+def _openclaw_format_tool_result(message):
+    if not isinstance(message, dict):
+        return None
+
+    tool_name = message.get("toolName")
+    tool_call_id = message.get("toolCallId")
+    is_error = message.get("isError")
+    details = message.get("details") if isinstance(message.get("details"), dict) else None
+    content = message.get("content")
+
+    header = f"Tool result: {tool_name}" if tool_name else "Tool result:"
+    lines = [header]
+    if tool_call_id:
+        lines.append(f"Tool call ID: {tool_call_id}")
+
+    status = None
+    exit_code = None
+    duration_ms = None
+    if is_error is True:
+        status = "error"
+    elif is_error is False:
+        status = "ok"
+
+    if details:
+        detail_status = str(details.get("status") or "").strip().lower()
+        if detail_status in ("completed", "ok", "success") and status is None:
+            status = "ok"
+        elif detail_status in ("error", "failed", "failure") and status is None:
+            status = "error"
+        if isinstance(details.get("exitCode"), (int, float)):
+            exit_code = int(details["exitCode"])
+        if isinstance(details.get("durationMs"), (int, float)):
+            duration_ms = int(details["durationMs"])
+
+    if status:
+        lines.append(f"Status: {status}")
+    if exit_code is not None:
+        lines.append(f"Exit code: {exit_code}")
+    if duration_ms is not None:
+        lines.append(f"Wall time: {duration_ms}ms")
+
+    text = ""
+    if isinstance(content, str):
+        text = content.strip()
+    elif isinstance(content, list):
+        text = extract_text(content).strip()
+
+    if text:
+        lines.append("Output:")
+        lines.append(f"````\n{text}\n````")
+    elif details:
+        lines.append("Output:")
+        lines.append(f"````\n{json.dumps(details, ensure_ascii=False, indent=2)}\n````")
+
+    return "\n".join(lines).strip()
+
+
+def parse_openclaw_session_file(path: Path):
+    session_id = None
+    start_ts_ms = None
+    end_ts_ms = None
+    cwd = None
+    title = None
+    message_count = 0
+    messages = []
+    search_parts = []
+    search_len = 0
+
+    def add_search(text):
+        nonlocal search_len
+        if not text:
+            return
+        if search_len >= MAX_SEARCH_CHARS:
+            return
+        remaining = MAX_SEARCH_CHARS - search_len
+        if len(text) > remaining:
+            text = text[:remaining]
+        search_parts.append(text)
+        search_len += len(text)
+
+    def add_message(ts_ms, role, kind, text, count_for_stats=False):
+        nonlocal message_count, title
+        if not text:
+            return
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        messages.append({
+            "ts_ms": ts_ms,
+            "role": role,
+            "kind": kind,
+            "text": cleaned,
+        })
+        add_search(cleaned)
+        if count_for_stats:
+            message_count += 1
+            if title is None and role == "user":
+                first_line = cleaned.splitlines()[0] if cleaned else ""
+                if first_line:
+                    title = first_line[:80]
+
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+
+                if not isinstance(obj, dict):
+                    continue
+
+                ts_ms = parse_ts(obj.get("timestamp"))
+                if ts_ms is not None:
+                    if start_ts_ms is None or ts_ms < start_ts_ms:
+                        start_ts_ms = ts_ms
+                    if end_ts_ms is None or ts_ms > end_ts_ms:
+                        end_ts_ms = ts_ms
+
+                obj_type = obj.get("type")
+                if obj_type == "session":
+                    session_id = obj.get("id") or session_id
+                    if isinstance(obj.get("cwd"), str) and obj.get("cwd"):
+                        cwd = obj["cwd"]
+                    continue
+
+                if obj_type != "message":
+                    continue
+
+                message = obj.get("message")
+                if not isinstance(message, dict):
+                    continue
+
+                role = message.get("role") or "unknown"
+                content = message.get("content")
+
+                if role == "user":
+                    if isinstance(content, str):
+                        text = content.strip()
+                        if text.startswith("A new session was started via /new or /reset."):
+                            add_message(ts_ms, "system", "context", text, count_for_stats=False)
+                        else:
+                            add_message(ts_ms, "user", "message", text, count_for_stats=True)
+                    elif isinstance(content, list):
+                        for item in content:
+                            if not isinstance(item, dict):
+                                continue
+                            text = _claude_extract_text_item(item)
+                            if not text:
+                                continue
+                            if text.startswith("A new session was started via /new or /reset."):
+                                add_message(ts_ms, "system", "context", text, count_for_stats=False)
+                            else:
+                                add_message(ts_ms, "user", "message", text, count_for_stats=True)
+                    continue
+
+                if role == "assistant":
+                    error_message = message.get("errorMessage")
+                    if isinstance(error_message, str) and error_message.strip():
+                        add_message(ts_ms, "assistant", "message", f"[error] {error_message.strip()}", count_for_stats=False)
+                    if isinstance(content, str):
+                        add_message(ts_ms, "assistant", "message", content, count_for_stats=True)
+                    elif isinstance(content, list):
+                        for item in content:
+                            if not isinstance(item, dict):
+                                continue
+                            item_type = item.get("type")
+                            if item_type == "text":
+                                add_message(ts_ms, "assistant", "message", item.get("text"), count_for_stats=True)
+                                continue
+                            if item_type == "thinking":
+                                add_message(ts_ms, "other", "thinking", item.get("thinking"), count_for_stats=False)
+                                continue
+                            if item_type in ("toolCall", "tool_use"):
+                                add_message(ts_ms, "tool", "tool_use", _openclaw_format_tool_use(item), count_for_stats=False)
+                                continue
+                            text = _claude_extract_text_item(item)
+                            if text:
+                                add_message(ts_ms, "assistant", "message", text, count_for_stats=True)
+                    continue
+
+                if role in ("toolResult", "tool_result", "tool"):
+                    add_message(ts_ms, "tool", "tool_result", _openclaw_format_tool_result(message), count_for_stats=False)
+                    continue
+
+                if isinstance(content, str):
+                    add_message(ts_ms, role, "message", content, count_for_stats=False)
+                elif isinstance(content, list):
+                    text = extract_text(content)
+                    if text:
+                        add_message(ts_ms, role, "message", text, count_for_stats=False)
+    except FileNotFoundError:
+        return None
+
+    if not session_id:
+        session_id = f"file-{path.stem}"
+
+    if start_ts_ms is None:
+        start_ts_ms = end_ts_ms or 0
+    if end_ts_ms is None:
+        end_ts_ms = start_ts_ms
+
+    if not title:
+        title = f"Session {session_id[:8]}"
+
+    search_blob = "\n".join(search_parts)
+
+    return {
+        "id": session_id,
+        "file_path": str(path),
+        "start_ts_ms": int(start_ts_ms),
+        "end_ts_ms": int(end_ts_ms),
+        "cwd": cwd,
+        "title": title,
+        "message_count": message_count,
+        "messages": messages,
+        "search_blob": search_blob,
+    }
+
+
 class Indexer:
     def __init__(
         self,
@@ -750,6 +996,10 @@ class Indexer:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_end_ts ON sessions(end_ts_ms)")
             try:
                 cur.execute("ALTER TABLE sessions ADD COLUMN parser_version INTEGER")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                cur.execute("ALTER TABLE sessions ADD COLUMN pinned INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
             self.conn.commit()
@@ -843,12 +1093,12 @@ class Indexer:
 
         sort_key = str(sort or "start").strip().lower()
         if sort_key in ("last", "end", "updated", "update"):
-            order_clause = " ORDER BY end_ts_ms DESC, start_ts_ms DESC"
+            order_clause = " ORDER BY COALESCE(pinned,0) DESC, end_ts_ms DESC, start_ts_ms DESC"
         else:
-            order_clause = " ORDER BY start_ts_ms DESC, end_ts_ms DESC"
+            order_clause = " ORDER BY COALESCE(pinned,0) DESC, start_ts_ms DESC, end_ts_ms DESC"
 
         sql = (
-            "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd "
+            "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned "
             "FROM sessions WHERE 1=1"
         )
         args = []
@@ -890,7 +1140,7 @@ class Indexer:
     def get_session(self, session_id):
         with self.lock:
             session = self.conn.execute(
-                "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd FROM sessions WHERE id = ?",
+                "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned FROM sessions WHERE id = ?",
                 (session_id,),
             ).fetchone()
             if not session:
@@ -904,46 +1154,370 @@ class Indexer:
             "messages": [dict(row) for row in messages],
         }
 
+    def rename_session(self, session_id, title):
+        with self.lock:
+            cur = self.conn.execute(
+                "UPDATE sessions SET title = ? WHERE id = ?", (title, session_id)
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
+
+    def archive_session(self, session_id, archived_dir):
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT file_path FROM sessions WHERE id = ?", (session_id,)
+            ).fetchone()
+            if not row:
+                return False, "not_found"
+            file_path = Path(row["file_path"])
+            if file_path.exists():
+                archived_dir = Path(archived_dir)
+                archived_dir.mkdir(parents=True, exist_ok=True)
+                dest = archived_dir / file_path.name
+                if dest.exists():
+                    dest = archived_dir / (file_path.stem + f"-{session_id[:8]}" + file_path.suffix)
+                shutil.move(str(file_path), str(dest))
+            self.conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            self.conn.commit()
+            return True, "archived"
+
+    def _delete_sessions_with_backup(self, rows, deleted_dir, backup_label):
+        deleted_dir = Path(deleted_dir)
+        backup_dir = deleted_dir / (
+            f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-{backup_label}"
+        )
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        session_ids = []
+        for row in rows:
+            session_id = row["id"]
+            session_ids.append(session_id)
+            file_path = Path(row["file_path"])
+            if not file_path.exists():
+                continue
+            dest = backup_dir / file_path.name
+            if dest.exists():
+                dest = backup_dir / (file_path.stem + f"-{session_id[:8]}" + file_path.suffix)
+            shutil.move(str(file_path), str(dest))
+
+        if session_ids:
+            placeholders = ",".join("?" for _ in session_ids)
+            self.conn.execute(
+                f"DELETE FROM messages WHERE session_id IN ({placeholders})",
+                session_ids,
+            )
+            self.conn.execute(
+                f"DELETE FROM sessions WHERE id IN ({placeholders})",
+                session_ids,
+            )
+            self.conn.commit()
+        return len(session_ids), str(backup_dir)
+
+    def delete_project_sessions(self, project, deleted_dir):
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT id, file_path FROM sessions WHERE cwd = ? ORDER BY start_ts_ms DESC, id DESC",
+                (project,),
+            ).fetchall()
+            if not rows:
+                return False, "not_found", 0, None
+
+            deleted_count, backup_dir = self._delete_sessions_with_backup(
+                rows,
+                deleted_dir,
+                slugify_path_label(project),
+            )
+            return True, "deleted", deleted_count, backup_dir
+
+    def cleanup_weak_sessions(self, deleted_dir, min_user_messages=5, project=None):
+        with self.lock:
+            sql = (
+                "SELECT s.id, s.file_path, s.title, s.cwd, "
+                "COALESCE(SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END), 0) AS user_count "
+                "FROM sessions s "
+                "LEFT JOIN messages m ON m.session_id = s.id "
+            )
+            args = []
+            if project:
+                sql += "WHERE s.cwd = ? "
+                args.append(project)
+            sql += "GROUP BY s.id, s.file_path, s.title, s.cwd ORDER BY s.start_ts_ms DESC, s.id DESC"
+            rows = self.conn.execute(sql, args).fetchall()
+
+            weak_rows = []
+            for row in rows:
+                user_count = int(row["user_count"] or 0)
+                if user_count < int(min_user_messages):
+                    weak_rows.append(row)
+
+            if not weak_rows:
+                return True, "none", 0, None
+
+            label = "weak-sessions"
+            if project:
+                label = f"{slugify_path_label(project)}-weak-sessions"
+            deleted_count, backup_dir = self._delete_sessions_with_backup(
+                weak_rows,
+                deleted_dir,
+                label,
+            )
+            return True, "deleted", deleted_count, backup_dir
+
+    def pin_session(self, session_id, pinned):
+        with self.lock:
+            cur = self.conn.execute(
+                "UPDATE sessions SET pinned = ? WHERE id = ?", (1 if pinned else 0, session_id)
+            )
+            self.conn.commit()
+            return cur.rowcount > 0
+
+
+class WslBootstrapper:
+    def __init__(self, distro):
+        self.distro = str(distro or "").strip()
+        self.lock = threading.Lock()
+        self.last_ok = 0.0
+
+    def ensure(self, max_age_seconds=15):
+        if not self.distro:
+            return
+        now = time.time()
+        if now - self.last_ok < max_age_seconds:
+            return
+        with self.lock:
+            now = time.time()
+            if now - self.last_ok < max_age_seconds:
+                return
+            try:
+                subprocess.run(
+                    ["wsl.exe", "-d", self.distro, "--", "true"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=20,
+                    check=True,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise RuntimeError(f"Failed to start WSL distro {self.distro}: {exc}") from exc
+            self.last_ok = time.time()
+
+
+class SourceBackend:
+    def __init__(
+        self,
+        *,
+        system,
+        source,
+        root_dir,
+        sessions_dir,
+        data_dir,
+        db_filename,
+        parse_file_fn,
+        parser_version,
+        scan_interval,
+        archived_dir,
+        deleted_dir,
+        file_filter_fn=None,
+        ensure_fn=None,
+    ):
+        self.system = system
+        self.source = source
+        self.root_dir = Path(root_dir)
+        self.sessions_dir = Path(sessions_dir)
+        self.archived_dir = Path(archived_dir)
+        self.deleted_dir = Path(deleted_dir)
+        self.ensure_fn = ensure_fn
+        self.indexer = Indexer(
+            sessions_dir=self.sessions_dir,
+            data_dir=Path(data_dir),
+            db_filename=db_filename,
+            scan_interval=scan_interval,
+            parse_file_fn=parse_file_fn,
+            file_filter_fn=file_filter_fn,
+            parser_version=parser_version,
+        )
+        if self.ensure_fn is None:
+            self.indexer.maybe_update_index(max_age_seconds=0)
+
+    def ensure_ready(self):
+        if self.ensure_fn:
+            self.ensure_fn()
+
 
 class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, directory=None, codex_indexer=None, claude_indexer=None, **kwargs):
-        self._codex_indexer = codex_indexer
-        self._claude_indexer = claude_indexer
+    def __init__(self, *args, directory=None, source_backends=None, wsl_distro=None, **kwargs):
+        self._source_backends = source_backends or {}
+        self._wsl_distro = wsl_distro
         super().__init__(*args, directory=directory, **kwargs)
+
+    def _resolve_source_request(self, path):
+        if path.startswith("/api/windows/") or path.startswith("/api/wsl/"):
+            parts = path.split("/")
+            if len(parts) >= 5:
+                system = parts[2]
+                source = parts[3]
+                backend = self._source_backends.get((system, source))
+                subpath = "/" + "/".join(parts[4:])
+                return backend, subpath
+            return None, None
+
+        if path == "/api/claude" or path.startswith("/api/claude/"):
+            backend = self._source_backends.get(("windows", "claude"))
+            subpath = path[len("/api/claude"):] or "/"
+            return backend, subpath
+
+        if path == "/api" or path.startswith("/api/"):
+            backend = self._source_backends.get(("windows", "codex"))
+            subpath = path[len("/api"):] or "/"
+            return backend, subpath
+
+        return None, None
+
+    def _ensure_backend_ready(self, backend):
+        if backend is None:
+            self.send_json({"error": "not found"}, status=404)
+            return False
+        try:
+            backend.ensure_ready()
+        except RuntimeError as exc:
+            self.send_json({"error": "source_unavailable", "detail": str(exc)}, status=503)
+            return False
+        return True
+
+    def _extract_session_id(self, source_path, suffix=""):
+        if not source_path or not source_path.startswith("/session/"):
+            return None
+        end = -len(suffix) if suffix else None
+        return unquote(source_path[len("/session/"):end])
 
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
 
-        if path == "/api/sessions":
-            return self.handle_sessions(parsed, self._codex_indexer)
-        if path == "/api/projects":
-            return self.handle_projects(parsed, self._codex_indexer)
-        if path.startswith("/api/session/"):
-            session_id = unquote(path[len("/api/session/"):])
-            return self.handle_session(session_id, self._codex_indexer)
-        if path == "/api/reindex":
-            self._codex_indexer.scan_sessions()
-            return self.send_json({"ok": True})
+        if path == "/api/sources":
+            return self.handle_sources()
 
-        if path == "/api/claude/sessions":
-            return self.handle_sessions(parsed, self._claude_indexer)
-        if path == "/api/claude/projects":
-            return self.handle_projects(parsed, self._claude_indexer)
-        if path.startswith("/api/claude/session/"):
-            session_id = unquote(path[len("/api/claude/session/"):])
-            return self.handle_session(session_id, self._claude_indexer)
-        if path == "/api/claude/reindex":
-            self._claude_indexer.scan_sessions()
-            return self.send_json({"ok": True})
+        backend, source_path = self._resolve_source_request(path)
+        if backend or path.startswith("/api/"):
+            if not self._ensure_backend_ready(backend):
+                return
+            if source_path == "/sessions":
+                return self.handle_sessions(parsed, backend)
+            if source_path == "/projects":
+                return self.handle_projects(parsed, backend)
+            if source_path and source_path.startswith("/session/"):
+                session_id = self._extract_session_id(source_path)
+                return self.handle_session(session_id, backend)
+            if source_path == "/reindex":
+                backend.indexer.scan_sessions()
+                return self.send_json({"ok": True})
+            return self.send_json({"error": "not found"}, status=404)
 
         if parsed.path in ("/", "/index.html"):
             self.path = "/index.html"
             return super().do_GET()
         return super().do_GET()
 
-    def handle_sessions(self, parsed, indexer):
-        indexer.maybe_update_index()
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length) if length else b""
+        try:
+            data = json.loads(body) if body else {}
+        except Exception:
+            data = {}
+
+        backend, source_path = self._resolve_source_request(path)
+        if not backend or not source_path:
+            return self.send_json({"error": "not found"}, status=404)
+        if not self._ensure_backend_ready(backend):
+            return
+
+        def _rename():
+            title = data.get("title", "").strip()
+            if not title:
+                return self.send_json({"error": "title required"}, status=400)
+            session_id = self._extract_session_id(source_path, "/rename")
+            ok = backend.indexer.rename_session(session_id, title)
+            return self.send_json({"ok": ok})
+
+        def _archive():
+            session_id = self._extract_session_id(source_path, "/archive")
+            ok, detail = backend.indexer.archive_session(session_id, backend.archived_dir)
+            if not ok:
+                return self.send_json({"error": detail}, status=404)
+            return self.send_json({"ok": True})
+
+        def _pin():
+            pinned = data.get("pinned", True)
+            session_id = self._extract_session_id(source_path, "/pin")
+            ok = backend.indexer.pin_session(session_id, pinned)
+            return self.send_json({"ok": ok})
+
+        def _delete_project():
+            project = data.get("project", "").strip()
+            if not project:
+                return self.send_json({"error": "project required"}, status=400)
+            ok, detail, deleted_count, backup_dir = backend.indexer.delete_project_sessions(project, backend.deleted_dir)
+            if not ok:
+                return self.send_json({"error": detail}, status=404)
+            return self.send_json({
+                "ok": True,
+                "deleted_count": deleted_count,
+                "backup_dir": backup_dir,
+            })
+
+        def _cleanup_weak():
+            project = data.get("project", "").strip() or None
+            try:
+                min_user_messages = int(data.get("min_user_messages", 5))
+            except Exception:
+                min_user_messages = 5
+            ok, detail, deleted_count, backup_dir = backend.indexer.cleanup_weak_sessions(
+                backend.deleted_dir,
+                min_user_messages=min_user_messages,
+                project=project,
+            )
+            return self.send_json({
+                "ok": ok,
+                "detail": detail,
+                "deleted_count": deleted_count,
+                "backup_dir": backup_dir,
+            })
+
+        if source_path == "/project/delete":
+            return _delete_project()
+        if source_path == "/cleanup/weak-sessions":
+            return _cleanup_weak()
+        if source_path.startswith("/session/"):
+            if source_path.endswith("/rename"):
+                return _rename()
+            if source_path.endswith("/archive"):
+                return _archive()
+            if source_path.endswith("/pin"):
+                return _pin()
+
+        return self.send_json({"error": "not found"}, status=404)
+
+    def handle_sources(self):
+        items = []
+        for (system, source), backend in sorted(self._source_backends.items()):
+            items.append({
+                "system": system,
+                "source": source,
+                "root_dir": str(backend.root_dir),
+                "sessions_dir": str(backend.sessions_dir),
+                "archived_dir": str(backend.archived_dir),
+                "deleted_dir": str(backend.deleted_dir),
+            })
+        return self.send_json({
+            "sources": items,
+            "wsl_distro": self._wsl_distro,
+        })
+
+    def handle_sessions(self, parsed, backend):
+        backend.indexer.maybe_update_index()
         params = parse_qs(parsed.query)
         q = params.get("q", [""])[0].strip() or None
         start = params.get("start", [None])[0]
@@ -955,20 +1529,20 @@ class Handler(SimpleHTTPRequestHandler):
         start_ms = parse_date_param(start, end=False)
         end_ms = parse_date_param(end, end=True)
 
-        sessions = indexer.query_sessions(q=q, start_ms=start_ms, end_ms=end_ms, limit=limit, cwd=project, sort=sort)
+        sessions = backend.indexer.query_sessions(q=q, start_ms=start_ms, end_ms=end_ms, limit=limit, cwd=project, sort=sort)
         return self.send_json({"sessions": sessions})
 
-    def handle_projects(self, parsed, indexer):
-        indexer.maybe_update_index()
+    def handle_projects(self, parsed, backend):
+        backend.indexer.maybe_update_index()
         params = parse_qs(parsed.query)
         q = params.get("q", [""])[0].strip() or None
         limit = params.get("limit", [DEFAULT_LIMIT])[0]
-        projects = indexer.query_projects(q=q, limit=limit)
+        projects = backend.indexer.query_projects(q=q, limit=limit)
         return self.send_json({"projects": projects})
 
-    def handle_session(self, session_id, indexer):
-        indexer.maybe_update_index()
-        data = indexer.get_session(session_id)
+    def handle_session(self, session_id, backend):
+        backend.indexer.maybe_update_index()
+        data = backend.indexer.get_session(session_id)
         if not data:
             return self.send_json({"error": "not_found"}, status=404)
         return self.send_json(data)
@@ -983,9 +1557,15 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Codex + Claude Code history viewer")
+    parser = argparse.ArgumentParser(description="Codex + Claude + OpenClaw history viewer")
     parser.add_argument("--codex-dir", default=os.path.expanduser("~/.codex"))
     parser.add_argument("--claude-dir", default=os.path.expanduser("~/.claude"))
+    parser.add_argument("--openclaw-dir", default=os.path.expanduser("~/.openclaw"))
+    parser.add_argument("--wsl-distro", default="Ubuntu-22.04")
+    parser.add_argument("--wsl-user", default="muqiao")
+    parser.add_argument("--wsl-codex-dir", default=None)
+    parser.add_argument("--wsl-claude-dir", default=None)
+    parser.add_argument("--wsl-openclaw-dir", default=None)
     parser.add_argument("--data-dir", default=None, help="Directory for index.sqlite")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
@@ -994,29 +1574,55 @@ def main():
 
     codex_dir = Path(args.codex_dir).expanduser()
     claude_dir = Path(args.claude_dir).expanduser()
+    openclaw_dir = Path(args.openclaw_dir).expanduser()
     data_dir = Path(args.data_dir).expanduser() if args.data_dir else Path(__file__).resolve().parent
     data_dir.mkdir(parents=True, exist_ok=True)
 
-    codex_indexer = Indexer(
-        sessions_dir=codex_dir / "sessions",
-        data_dir=data_dir,
-        db_filename="index.sqlite",
-        scan_interval=args.scan_interval,
-        parse_file_fn=parse_codex_session_file,
-        parser_version=4,
-    )
-    codex_indexer.maybe_update_index(max_age_seconds=0)
+    wsl_home = Path(f"\\\\wsl$\\{args.wsl_distro}\\home\\{args.wsl_user}")
+    wsl_codex_dir = Path(args.wsl_codex_dir) if args.wsl_codex_dir else (wsl_home / ".codex")
+    wsl_claude_dir = Path(args.wsl_claude_dir) if args.wsl_claude_dir else (wsl_home / ".claude")
+    wsl_openclaw_dir = Path(args.wsl_openclaw_dir) if args.wsl_openclaw_dir else (wsl_home / ".openclaw")
 
-    claude_indexer = Indexer(
-        sessions_dir=claude_dir / "projects",
-        data_dir=data_dir,
-        db_filename="index_claude.sqlite",
-        scan_interval=args.scan_interval,
-        parse_file_fn=parse_claude_session_file,
-        file_filter_fn=lambda p: not p.name.startswith("agent-"),
-        parser_version=3,
-    )
-    claude_indexer.maybe_update_index(max_age_seconds=0)
+    wsl_bootstrapper = WslBootstrapper(args.wsl_distro)
+    source_backends = {}
+
+    def register_source(
+        system,
+        source,
+        root_dir,
+        sessions_dir,
+        db_filename,
+        parse_file_fn,
+        parser_version,
+        *,
+        file_filter_fn=None,
+        ensure_fn=None,
+    ):
+        source_backends[(system, source)] = SourceBackend(
+            system=system,
+            source=source,
+            root_dir=root_dir,
+            sessions_dir=sessions_dir,
+            data_dir=data_dir,
+            db_filename=db_filename,
+            parse_file_fn=parse_file_fn,
+            parser_version=parser_version,
+            scan_interval=args.scan_interval,
+            archived_dir=Path(root_dir) / "archived_sessions",
+            deleted_dir=Path(root_dir) / "deleted_projects",
+            file_filter_fn=file_filter_fn,
+            ensure_fn=ensure_fn,
+        )
+
+    openclaw_filter = lambda p: p.parent.name == "sessions"
+    claude_filter = lambda p: not p.name.startswith("agent-")
+
+    register_source("windows", "codex", codex_dir, codex_dir / "sessions", "index.sqlite", parse_codex_session_file, 4)
+    register_source("windows", "claude", claude_dir, claude_dir / "projects", "index_claude.sqlite", parse_claude_session_file, 3, file_filter_fn=claude_filter)
+    register_source("windows", "openclaw", openclaw_dir, openclaw_dir / "agents", "index_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter)
+    register_source("wsl", "codex", wsl_codex_dir, wsl_codex_dir / "sessions", "index_wsl_codex.sqlite", parse_codex_session_file, 4, ensure_fn=wsl_bootstrapper.ensure)
+    register_source("wsl", "claude", wsl_claude_dir, wsl_claude_dir / "projects", "index_wsl_claude.sqlite", parse_claude_session_file, 3, file_filter_fn=claude_filter, ensure_fn=wsl_bootstrapper.ensure)
+    register_source("wsl", "openclaw", wsl_openclaw_dir, wsl_openclaw_dir / "agents", "index_wsl_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter, ensure_fn=wsl_bootstrapper.ensure)
 
     static_dir = Path(__file__).resolve().parent / "static"
 
@@ -1024,17 +1630,18 @@ def main():
         return Handler(
             *inner_args,
             directory=str(static_dir),
-            codex_indexer=codex_indexer,
-            claude_indexer=claude_indexer,
+            source_backends=source_backends,
+            wsl_distro=args.wsl_distro,
             **inner_kwargs,
         )
 
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(f"History viewer running on http://{args.host}:{args.port}")
-    print(f"Codex logs:  {codex_dir}")
-    print(f"Claude logs: {claude_dir}")
-    print(f"Codex index:  {codex_indexer.db_path}")
-    print(f"Claude index: {claude_indexer.db_path}")
+    for key in sorted(source_backends):
+        backend = source_backends[key]
+        print(f"{backend.system}/{backend.source}: {backend.root_dir}")
+        print(f"  sessions: {backend.sessions_dir}")
+        print(f"  index:    {backend.indexer.db_path}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

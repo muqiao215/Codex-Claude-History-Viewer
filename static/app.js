@@ -16,12 +16,20 @@ const nextMatchBtn = document.getElementById("nextMatch");
 const clearSessionSearch = document.getElementById("clearSessionSearch");
 const workdirValueEl = document.getElementById("workdirValue");
 const resumeValueEl = document.getElementById("resumeValue");
-const resumeCmdEl = document.getElementById("resumeCmd");
+const resumeCmdPsEl = document.getElementById("resumeCmdPs");
+const resumeCmdWslEl = document.getElementById("resumeCmdWsl");
 const copyWorkdirBtn = document.getElementById("copyWorkdir");
 const copyResumeIdBtn = document.getElementById("copyResumeId");
-const copyResumeCmdBtn = document.getElementById("copyResumeCmd");
+const copyResumeCmdPsBtn = document.getElementById("copyResumeCmdPs");
+const copyResumeCmdWslBtn = document.getElementById("copyResumeCmdWsl");
+const sessionActionsEl = document.getElementById("sessionActions");
+const pinSessionBtn = document.getElementById("pinSession");
+const renameSessionBtn = document.getElementById("renameSession");
+const archiveSessionBtn = document.getElementById("archiveSession");
 const projectCrumbEl = document.getElementById("projectCrumb");
 const backToProjectsBtn = document.getElementById("backToProjects");
+const deleteProjectSessionsBtn = document.getElementById("deleteProjectSessions");
+const cleanupWeakSessionsBtn = document.getElementById("cleanupWeakSessions");
 const sidebarEl = document.getElementById("sidebar");
 const sidebarTopEl = document.getElementById("sidebarTop");
 const sidebarSessionsResizerEl = document.getElementById("sidebarSessionsResizer");
@@ -32,7 +40,8 @@ const codeThemeButtons = document.querySelectorAll("[data-code-theme]");
 
 let currentSession = null;
 let currentMessages = [];
-let currentSource = "codex"; // "codex" | "claude"
+let currentSystem = "windows"; // "windows" | "wsl"
+let currentSource = "codex"; // "codex" | "claude" | "openclaw"
 let browseMode = "sessions"; // "sessions" | "projects"
 let currentProject = null; // string (cwd)
 let currentMarks = [];
@@ -44,11 +53,14 @@ let projectsFetchSeq = 0;
 let sessionFetchSeq = 0;
 let currentCodeTheme = "light";
 let currentSessionSort = "start"; // "start" | "last"
+const WSL_DISTRO = "Ubuntu-22.04";
 
 const UI_STORAGE_KEYS = {
   roleFilters: "historyViewer.ui.roleFilters",
   codeTheme: "historyViewer.ui.codeTheme",
   sessionSort: "historyViewer.ui.sessionSort",
+  system: "historyViewer.ui.system",
+  source: "historyViewer.ui.source",
 };
 
 const LAYOUT_STORAGE_KEYS = {
@@ -67,7 +79,7 @@ const LAYOUT_LIMITS = {
 };
 
 function apiBase() {
-  return currentSource === "claude" ? "/api/claude" : "/api";
+  return `/api/${currentSystem}/${currentSource}`;
 }
 
 function formatTime(ms) {
@@ -119,6 +131,71 @@ function normalizeDateInput(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : "";
 }
 
+function isWindowsPath(value) {
+  return /^[A-Za-z]:[\\/]/.test(value || "");
+}
+
+function quotePowerShell(value) {
+  return `'${String(value || "").replaceAll("'", "''")}'`;
+}
+
+function quotePowerShellDouble(value) {
+  return `"${String(value || "").replaceAll("`", "``").replaceAll('"', '`"')}"`;
+}
+
+function quoteShell(value) {
+  return `'${String(value || "").replaceAll("'", `'\\''`)}'`;
+}
+
+function toWslPath(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^[A-Za-z]:[\\/]/.test(raw)) {
+    const drive = raw[0].toLowerCase();
+    const rest = raw.slice(2).replaceAll("\\", "/");
+    return `/mnt/${drive}${rest}`;
+  }
+  return raw.replaceAll("\\", "/");
+}
+
+function getSourceLabel(source = currentSource) {
+  if (source === "claude") return "Claude Code";
+  if (source === "openclaw") return "OpenClaw";
+  return "Codex";
+}
+
+function buildResumeInvocation(system, source, sessionId) {
+  if (!sessionId || sessionId === "-") return "";
+  if (source === "codex") return `codex resume ${sessionId}`;
+  if (source === "claude" && system === "windows") return `claude -r ${sessionId}`;
+  return "";
+}
+
+function buildResumeCommands(system, source, cwd, sessionId) {
+  const command = buildResumeInvocation(system, source, sessionId);
+  if (!command) {
+    return { ps: "-", wsl: "-" };
+  }
+
+  if (system === "wsl") {
+    const shellCommand = cwd
+      ? `source ~/.bashrc >/dev/null 2>&1; cd ${quoteShell(cwd)} && ${command}`
+      : `source ~/.bashrc >/dev/null 2>&1; ${command}`;
+    return {
+      ps: `wsl.exe -d ${WSL_DISTRO} -- bash -lc ${quotePowerShellDouble(shellCommand)}`,
+      wsl: shellCommand,
+    };
+  }
+
+  const ps = cwd && isWindowsPath(cwd)
+    ? `Set-Location -LiteralPath ${quotePowerShell(cwd)}; ${command}`
+    : command;
+  const wsl = cwd
+    ? `cd ${quoteShell(toWslPath(cwd))} && ${command}`
+    : command;
+  return { ps, wsl };
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -152,8 +229,10 @@ function safeJsonParse(raw) {
 }
 
 function setCodeTheme(theme, { persist } = { persist: false }) {
-  const allowed = new Set(["light", "dim", "dark"]);
-  const next = allowed.has(theme) ? theme : "light";
+  const aliases = { dim: "warm" };
+  const normalized = aliases[theme] || theme;
+  const allowed = new Set(["light", "slate", "warm", "forest", "grape", "dark"]);
+  const next = allowed.has(normalized) ? normalized : "light";
   currentCodeTheme = next;
   document.documentElement.dataset.codeTheme = next;
 
@@ -203,6 +282,54 @@ function applyStoredSessionSort() {
     saved = null;
   }
   setSessionSort(saved || "start", { persist: false });
+}
+
+function syncTabState(selector, key, value) {
+  document.querySelectorAll(selector).forEach((btn) => {
+    const active = btn.dataset[key] === value;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+  });
+}
+
+function setCurrentSystem(system, { persist } = { persist: false }) {
+  const allowed = new Set(["windows", "wsl"]);
+  const next = allowed.has(system) ? system : "windows";
+  currentSystem = next;
+  syncTabState("[data-system]", "system", currentSystem);
+  if (!persist) return;
+  try {
+    localStorage.setItem(UI_STORAGE_KEYS.system, currentSystem);
+  } catch {
+    // ignore
+  }
+}
+
+function setCurrentSource(source, { persist } = { persist: false }) {
+  const allowed = new Set(["codex", "claude", "openclaw"]);
+  const next = allowed.has(source) ? source : "codex";
+  currentSource = next;
+  syncTabState("[data-source]", "source", currentSource);
+  if (!persist) return;
+  try {
+    localStorage.setItem(UI_STORAGE_KEYS.source, currentSource);
+  } catch {
+    // ignore
+  }
+}
+
+function applyStoredSourceContext() {
+  let savedSystem = null;
+  let savedSource = null;
+  try {
+    savedSystem = localStorage.getItem(UI_STORAGE_KEYS.system);
+    savedSource = localStorage.getItem(UI_STORAGE_KEYS.source);
+  } catch {
+    savedSystem = null;
+    savedSource = null;
+  }
+  setCurrentSystem(savedSystem || "windows", { persist: false });
+  setCurrentSource(savedSource || "codex", { persist: false });
 }
 
 function applyRoleFiltersFromStorage(roleInputs) {
@@ -751,6 +878,9 @@ function sessionSortKeyMs(session) {
 function sortSessionsForSidebar(sessions) {
   const list = Array.isArray(sessions) ? [...sessions] : [];
   list.sort((a, b) => {
+    const pinA = a?.pinned ? 1 : 0;
+    const pinB = b?.pinned ? 1 : 0;
+    if (pinB !== pinA) return pinB - pinA;
     const keyDiff = sessionSortKeyMs(b) - sessionSortKeyMs(a);
     if (keyDiff) return keyDiff;
     const startDiff = (b?.start_ts_ms || 0) - (a?.start_ts_ms || 0);
@@ -786,9 +916,11 @@ function renderSessions(sessions) {
 
     const item = document.createElement("div");
     item.className = "session-item";
+    if (session.pinned) item.classList.add("pinned");
     item.dataset.sessionId = session.id;
+    const pinIcon = session.pinned ? '<span class="pin-icon">📌</span>' : '';
     item.innerHTML = `
-      <div class="session-title">${escapeHtml(session.title || "Session")}</div>
+      <div class="session-title">${pinIcon}${escapeHtml(session.title || "Session")}</div>
       <div class="session-meta">${escapeHtml(formatSessionMeta(session))}</div>
     `;
     sessionListEl.appendChild(item);
@@ -935,6 +1067,25 @@ function setActiveMarkIndex(index, { scroll }) {
   }
 }
 
+function resetSessionPane() {
+  currentSession = null;
+  currentMessages = [];
+  sessionSearchInput.value = "";
+  sessionSearchCount.textContent = "";
+  currentMarks = [];
+  activeMarkIndex = -1;
+  lastSessionTerm = "";
+  sessionHeaderEl.querySelector(".session-title").textContent = "Select a session";
+  sessionHeaderEl.querySelector(".session-meta").textContent = "";
+  workdirValueEl.textContent = "-";
+  resumeValueEl.textContent = "-";
+  resumeCmdPsEl.textContent = "-";
+  resumeCmdWslEl.textContent = "-";
+  messagesEl.innerHTML = "";
+  if (sessionActionsEl) sessionActionsEl.style.display = "none";
+  updateMatchNavState("");
+}
+
 function gotoNextMatch(delta) {
   const term = sessionSearchInput.value.trim();
   if (!term || !currentMarks.length) return;
@@ -960,38 +1111,37 @@ function renderSessionHeader(session) {
   workdirValueEl.textContent = cwd;
   const resumeId = session.id || "-";
   resumeValueEl.textContent = resumeId;
-  let resumeCmd = "-";
-  if (currentSource === "codex") {
-    resumeCmd = session.cwd
-      ? `cd \"${session.cwd}\" && codex --resume ${resumeId}`
-      : `codex --resume ${resumeId}`;
-  } else if (currentSource === "claude") {
-    resumeCmd = session.cwd
-      ? `cd \"${session.cwd}\" && claude -r ${resumeId}`
-      : `claude -r ${resumeId}`;
+  const resumeCommands = buildResumeCommands(currentSystem, currentSource, session.cwd, resumeId);
+  resumeCmdPsEl.textContent = resumeCommands.ps;
+  resumeCmdWslEl.textContent = resumeCommands.wsl;
+
+  if (sessionActionsEl) sessionActionsEl.style.display = "flex";
+  if (pinSessionBtn) {
+    pinSessionBtn.textContent = session.pinned ? "📌 Unpin" : "📌 Pin";
   }
-  resumeCmdEl.textContent = resumeCmd;
 }
 
 function setResultsHeader() {
   const showingSessions = !(browseMode === "projects" && !currentProject);
+  const showingProjectActions = browseMode === "projects" && !!currentProject;
   if (sessionSortWrapEl) {
     sessionSortWrapEl.style.display = showingSessions ? "flex" : "none";
+  }
+  backToProjectsBtn.style.display = showingProjectActions ? "inline-block" : "none";
+  if (deleteProjectSessionsBtn) {
+    deleteProjectSessionsBtn.style.display = showingProjectActions ? "inline-block" : "none";
   }
 
   if (browseMode === "projects" && !currentProject) {
     resultsLabelEl.textContent = "Projects";
     projectCrumbEl.textContent = "";
-    backToProjectsBtn.style.display = "none";
     return;
   }
   resultsLabelEl.textContent = "Sessions";
   if (browseMode === "projects" && currentProject) {
     projectCrumbEl.textContent = currentProject;
-    backToProjectsBtn.style.display = "inline-block";
   } else {
     projectCrumbEl.textContent = "";
-    backToProjectsBtn.style.display = "none";
   }
 }
 
@@ -1089,6 +1239,71 @@ async function reloadList() {
   return fetchSessions();
 }
 
+async function deleteProjectSessions(project) {
+  const name = (project || "").trim();
+  if (!name) return;
+  const countHint = resultCountEl.textContent && resultCountEl.textContent !== "0"
+    ? `\n\nThis currently shows ${resultCountEl.textContent} session(s).`
+    : "";
+  const confirmed = confirm(
+    `Delete all indexed chats for project:\n${name}\n\nThe source JSONL files will be moved to deleted_projects for backup.${countHint}`
+  );
+  if (!confirmed) return;
+
+  const res = await fetch(`${apiBase()}/project/delete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project: name }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert(data.error || "Delete project chats failed.");
+    return;
+  }
+
+  currentProject = null;
+  const prev = sessionListEl.querySelector(".session-item.active");
+  if (prev) prev.classList.remove("active");
+  resetSessionPane();
+  await reloadList();
+  const backupLine = data.backup_dir ? `\nBackup: ${data.backup_dir}` : "";
+  alert(`Deleted ${data.deleted_count || 0} session(s).${backupLine}`);
+}
+
+async function cleanupWeakSessions() {
+  const scopeLabel = currentProject
+    ? `project:\n${currentProject}`
+    : `${currentSystem === "wsl" ? "WSL" : "Windows"} ${getSourceLabel()} source`;
+  const confirmed = confirm(
+    `Cleanup weak chats in ${scopeLabel}?\n\nRule:\n- fewer than 5 user prompts\n\nExamples that will be deleted:\n- "hello"\n- "Set-Location -LiteralPath ...; codex resume ..."\n\nSource JSONL files will be moved to deleted_projects for backup.`
+  );
+  if (!confirmed) return;
+
+  const payload = { min_user_messages: 5 };
+  if (currentProject) payload.project = currentProject;
+
+  const res = await fetch(`${apiBase()}/cleanup/weak-sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert(data.error || "Cleanup weak chats failed.");
+    return;
+  }
+
+  resetSessionPane();
+  await reloadList();
+
+  if (!data.deleted_count) {
+    alert("No weak chats matched the cleanup rules.");
+    return;
+  }
+  const backupLine = data.backup_dir ? `\nBackup: ${data.backup_dir}` : "";
+  alert(`Deleted ${data.deleted_count} weak session(s).${backupLine}`);
+}
+
 function escapeHtml(text) {
   return text
     .replaceAll("&", "&amp;")
@@ -1127,6 +1342,7 @@ sessionListEl.addEventListener("click", (event) => {
     const project = item.dataset.project;
     if (!project) return;
     currentProject = project;
+    resetSessionPane();
     reloadList();
     return;
   }
@@ -1180,8 +1396,22 @@ backToProjectsBtn.addEventListener("click", () => {
   currentProject = null;
   const prev = sessionListEl.querySelector(".session-item.active");
   if (prev) prev.classList.remove("active");
+  resetSessionPane();
   reloadList();
 });
+
+if (deleteProjectSessionsBtn) {
+  deleteProjectSessionsBtn.addEventListener("click", async () => {
+    if (!currentProject) return;
+    await deleteProjectSessions(currentProject);
+  });
+}
+
+if (cleanupWeakSessionsBtn) {
+  cleanupWeakSessionsBtn.addEventListener("click", async () => {
+    await cleanupWeakSessions();
+  });
+}
 
 copyWorkdirBtn.addEventListener("click", () => {
   copyText(workdirValueEl.textContent || "");
@@ -1191,8 +1421,57 @@ copyResumeIdBtn.addEventListener("click", () => {
   copyText(resumeValueEl.textContent || "");
 });
 
-copyResumeCmdBtn.addEventListener("click", () => {
-  copyText(resumeCmdEl.textContent || "");
+copyResumeCmdPsBtn.addEventListener("click", () => {
+  copyText(resumeCmdPsEl.textContent || "");
+});
+
+copyResumeCmdWslBtn.addEventListener("click", () => {
+  copyText(resumeCmdWslEl.textContent || "");
+});
+
+pinSessionBtn.addEventListener("click", async () => {
+  if (!currentSession) return;
+  const newPinned = !currentSession.pinned;
+  const base = apiBase();
+  await fetch(`${base}/session/${encodeURIComponent(currentSession.id)}/pin`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pinned: newPinned }),
+  });
+  currentSession.pinned = newPinned ? 1 : 0;
+  renderSessionHeader(currentSession);
+  reloadList();
+});
+
+renameSessionBtn.addEventListener("click", async () => {
+  if (!currentSession) return;
+  const newTitle = prompt("New session name:", currentSession.title || "");
+  if (newTitle === null || newTitle.trim() === "") return;
+  const base = apiBase();
+  await fetch(`${base}/session/${encodeURIComponent(currentSession.id)}/rename`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title: newTitle.trim() }),
+  });
+  currentSession.title = newTitle.trim();
+  renderSessionHeader(currentSession);
+  reloadList();
+});
+
+archiveSessionBtn.addEventListener("click", async () => {
+  if (!currentSession) return;
+  const title = currentSession.title || currentSession.id;
+  if (!confirm(`Archive session "${title}"?\n\nThe file will be moved to archived_sessions.`)) return;
+  const base = apiBase();
+  const res = await fetch(`${base}/session/${encodeURIComponent(currentSession.id)}/archive`, {
+    method: "POST",
+  });
+  if (res.ok) {
+    resetSessionPane();
+    reloadList();
+  } else {
+    alert("Archive failed.");
+  }
 });
 
 codeThemeButtons.forEach((btn) => {
@@ -1204,6 +1483,7 @@ codeThemeButtons.forEach((btn) => {
 });
 applyStoredCodeTheme();
 applyStoredSessionSort();
+applyStoredSourceContext();
 
 if (sessionSortEl) {
   sessionSortEl.addEventListener("change", () => {
@@ -1225,23 +1505,22 @@ document.querySelectorAll("[data-source]").forEach((btn) => {
   btn.addEventListener("click", () => {
     const source = btn.dataset.source;
     if (!source || source === currentSource) return;
-    currentSource = source;
+    setCurrentSource(source, { persist: true });
     currentProject = null;
-    currentSession = null;
-    currentMessages = [];
-    sessionSearchInput.value = "";
-    sessionHeaderEl.querySelector(".session-title").textContent = "Select a session";
-    sessionHeaderEl.querySelector(".session-meta").textContent = "";
-    workdirValueEl.textContent = "-";
-    resumeValueEl.textContent = "-";
-    resumeCmdEl.textContent = "-";
+    resetSessionPane();
     messagesEl.innerHTML = "";
+    reloadList();
+  });
+});
 
-    document.querySelectorAll("[data-source]").forEach((b) => {
-      const active = b.dataset.source === currentSource;
-      b.classList.toggle("active", active);
-      b.setAttribute("aria-selected", active ? "true" : "false");
-    });
+document.querySelectorAll("[data-system]").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    const system = btn.dataset.system;
+    if (!system || system === currentSystem) return;
+    setCurrentSystem(system, { persist: true });
+    currentProject = null;
+    resetSessionPane();
+    messagesEl.innerHTML = "";
     reloadList();
   });
 });
@@ -1380,3 +1659,4 @@ window.addEventListener("resize", () => {
 });
 
 reloadList();
+
