@@ -1,0 +1,7 @@
+interface:
+  display_name: "History Viewer"
+  short_description: "Browse local Codex, Claude, and OpenClaw history"
+  default_prompt: "Use $codex-claude-history-viewer to open the local history UI and find a past Codex, Claude Code, or OpenClaw session."
+
+policy:
+  allow_implicit_invocation: true
