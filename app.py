@@ -15,6 +15,95 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 MAX_SEARCH_CHARS = 2_000_000
 DEFAULT_LIMIT = 200
+MESSAGE_INLINE_FULL_THRESHOLD = 12_000
+MESSAGE_PREVIEW_CHARS = 4_000
+SEARCH_MATCH_CONTEXT_CHARS = 1_600
+SEARCH_MATCH_MAX_CHARS = 3_600
+DEFAULT_PAGE_LIMIT = 50
+
+
+def detect_runtime_system(os_name=None):
+    return "windows" if str(os_name or os.name).lower() == "nt" else "linux"
+
+
+class RecallTitleStore:
+    def __init__(self, db_path: Path, source: str):
+        self.db_path = Path(db_path)
+        self.source = str(source or "").strip()
+        self._lock = threading.Lock()
+
+    def _connect(self):
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS session_meta (
+                session_id TEXT PRIMARY KEY,
+                source TEXT DEFAULT '',
+                custom_title TEXT,
+                updated_at INTEGER
+            )
+            """
+        )
+        conn.commit()
+        return conn
+
+    def get_custom_title(self, session_id):
+        if not session_id:
+            return None
+        try:
+            with self._lock:
+                conn = self._connect()
+                try:
+                    row = conn.execute(
+                        """
+                        SELECT custom_title
+                        FROM session_meta
+                        WHERE session_id = ? AND (source = ? OR source = '')
+                        """,
+                        (session_id, self.source),
+                    ).fetchone()
+                    if not row:
+                        return None
+                    title = row["custom_title"]
+                    if isinstance(title, str) and title.strip():
+                        return title.strip()
+                    return None
+                finally:
+                    conn.close()
+        except (OSError, PermissionError, sqlite3.Error):
+            return None
+
+    def set_custom_title(self, session_id, title):
+        if not session_id:
+            return False
+        clean_title = str(title or "").strip()
+        if not clean_title:
+            return False
+        try:
+            with self._lock:
+                conn = self._connect()
+                try:
+                    conn.execute(
+                        """
+                        INSERT INTO session_meta (session_id, source, custom_title, updated_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(session_id) DO UPDATE SET
+                            source = excluded.source,
+                            custom_title = excluded.custom_title,
+                            updated_at = excluded.updated_at
+                        """,
+                        (session_id, self.source, clean_title, int(time.time() * 1000)),
+                    )
+                    conn.commit()
+                    return True
+                finally:
+                    conn.close()
+        except (OSError, PermissionError, sqlite3.Error):
+            return False
 
 
 def parse_ts(value):
@@ -38,6 +127,86 @@ def parse_ts(value):
         except Exception:
             return None
     return None
+
+
+def build_message_preview_text(text, preview_chars=MESSAGE_PREVIEW_CHARS):
+    value = str(text or "")
+    if len(value) <= preview_chars:
+        return value
+
+    preview = value[:preview_chars]
+    last_newline = preview.rfind("\n")
+    if last_newline >= int(preview_chars * 0.6):
+        preview = preview[:last_newline]
+    return preview.rstrip()
+
+
+def build_search_excerpt_text(
+    text,
+    match_start,
+    match_end,
+    context_chars=SEARCH_MATCH_CONTEXT_CHARS,
+    max_chars=SEARCH_MATCH_MAX_CHARS,
+):
+    value = str(text or "")
+    if not value:
+        return {
+            "text": "",
+            "start": 0,
+            "end": 0,
+            "has_more_before": False,
+            "has_more_after": False,
+        }
+
+    clean_start = max(0, int(match_start or 0))
+    clean_end = max(clean_start, int(match_end or clean_start))
+    clean_context = max(0, int(context_chars or 0))
+    clean_max = max(1, int(max_chars or 1))
+
+    excerpt_start = max(0, clean_start - clean_context)
+    excerpt_end = min(len(value), clean_end + clean_context)
+
+    if excerpt_end - excerpt_start > clean_max:
+        match_width = max(1, clean_end - clean_start)
+        remaining = max(0, clean_max - match_width)
+        left_room = remaining // 2
+        right_room = remaining - left_room
+        excerpt_start = max(0, clean_start - left_room)
+        excerpt_end = min(len(value), clean_end + right_room)
+
+        window = excerpt_end - excerpt_start
+        if window < clean_max:
+            missing = clean_max - window
+            if excerpt_start == 0:
+                excerpt_end = min(len(value), excerpt_end + missing)
+            elif excerpt_end == len(value):
+                excerpt_start = max(0, excerpt_start - missing)
+
+    excerpt = value[excerpt_start:excerpt_end]
+    prefix = "...\n" if excerpt_start > 0 else ""
+    suffix = "\n..." if excerpt_end < len(value) else ""
+    return {
+        "text": f"{prefix}{excerpt}{suffix}",
+        "start": excerpt_start,
+        "end": excerpt_end,
+        "has_more_before": excerpt_start > 0,
+        "has_more_after": excerpt_end < len(value),
+    }
+
+
+def normalize_page_args(limit, offset, default_limit=DEFAULT_PAGE_LIMIT, max_limit=DEFAULT_LIMIT):
+    try:
+        clean_limit = int(limit)
+    except (TypeError, ValueError):
+        clean_limit = int(default_limit)
+    try:
+        clean_offset = int(offset)
+    except (TypeError, ValueError):
+        clean_offset = 0
+
+    clean_limit = max(1, min(int(max_limit), clean_limit))
+    clean_offset = max(0, clean_offset)
+    return clean_limit, clean_offset
 
 
 def parse_date_param(value, end=False):
@@ -940,22 +1109,27 @@ class Indexer:
         self,
         sessions_dir: Path,
         data_dir: Path,
+        source: str,
         db_filename: str = "index.sqlite",
         scan_interval: int = 5,
         parse_file_fn=None,
         file_filter_fn=None,
         parser_version: int = 1,
+        recall_db_path: Path | None = None,
     ):
         self.sessions_dir = sessions_dir
+        self.source = str(source or "").strip()
         self.db_path = data_dir / db_filename
         self._parse_file_fn = parse_file_fn or parse_codex_session_file
         self._file_filter_fn = file_filter_fn or (lambda p: True)
         self.parser_version = int(parser_version)
+        self.recall_titles = RecallTitleStore(recall_db_path, self.source) if recall_db_path else None
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.Lock()
         self.last_scan = 0
         self.scan_interval = max(1, int(scan_interval))
+        self._local_title_backfill_done = False
         self._init_db()
 
     def _init_db(self):
@@ -1009,9 +1183,11 @@ class Indexer:
             max_age_seconds = self.scan_interval
         now = time.time()
         if now - self.last_scan < max_age_seconds:
+            self.backfill_local_title_overrides()
             return
         self.scan_sessions()
         self.last_scan = now
+        self.backfill_local_title_overrides()
 
     def scan_sessions(self):
         if not self.sessions_dir.exists():
@@ -1025,7 +1201,7 @@ class Indexer:
                     continue
 
                 row = self.conn.execute(
-                    "SELECT id, mtime, parser_version FROM sessions WHERE file_path = ?",
+                    "SELECT id, mtime, parser_version, title FROM sessions WHERE file_path = ?",
                     (str(path),),
                 ).fetchone()
                 if (
@@ -1039,6 +1215,20 @@ class Indexer:
                 session = self._parse_file_fn(path)
                 if session is None:
                     continue
+
+                if self.recall_titles:
+                    custom_title = self.recall_titles.get_custom_title(session["id"])
+                    if (
+                        not custom_title
+                        and row
+                        and row["title"]
+                        and str(row["title"]).strip()
+                        and str(row["title"]).strip() != str(session["title"]).strip()
+                    ):
+                        custom_title = str(row["title"]).strip()
+                        self.recall_titles.set_custom_title(session["id"], custom_title)
+                    if custom_title:
+                        session["title"] = custom_title
 
                 if row and row["id"] != session["id"]:
                     self.conn.execute("DELETE FROM messages WHERE session_id = ?", (row["id"],))
@@ -1086,6 +1276,35 @@ class Indexer:
 
             self.conn.commit()
 
+    def backfill_local_title_overrides(self):
+        if self._local_title_backfill_done or not self.recall_titles:
+            return
+
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT id, file_path, title FROM sessions WHERE title IS NOT NULL AND title <> ''"
+            ).fetchall()
+
+        for row in rows:
+            session_id = row["id"]
+            file_path = row["file_path"]
+            stored_title = str(row["title"] or "").strip()
+            if not session_id or not file_path or not stored_title:
+                continue
+            if self.recall_titles.get_custom_title(session_id):
+                continue
+            try:
+                parsed = self._parse_file_fn(Path(file_path))
+            except Exception:
+                continue
+            if not parsed:
+                continue
+            parsed_title = str(parsed.get("title") or "").strip()
+            if parsed_title and parsed_title != stored_title:
+                self.recall_titles.set_custom_title(session_id, stored_title)
+
+        self._local_title_backfill_done = True
+
     def query_sessions(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_LIMIT, cwd=None, sort=None):
         terms = []
         if q:
@@ -1122,6 +1341,51 @@ class Indexer:
             rows = self.conn.execute(sql, args).fetchall()
         return [dict(row) for row in rows]
 
+    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None):
+        clean_limit, clean_offset = normalize_page_args(limit, offset)
+        terms = [t for t in str(q or "").split() if t]
+
+        sort_key = str(sort or "start").strip().lower()
+        if sort_key in ("last", "end", "updated", "update"):
+            order_clause = " ORDER BY COALESCE(pinned,0) DESC, end_ts_ms DESC, start_ts_ms DESC"
+        else:
+            order_clause = " ORDER BY COALESCE(pinned,0) DESC, start_ts_ms DESC, end_ts_ms DESC"
+
+        sql = (
+            "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned "
+            "FROM sessions WHERE 1=1"
+        )
+        args = []
+        if start_ms is not None:
+            sql += " AND start_ts_ms >= ?"
+            args.append(int(start_ms))
+        if end_ms is not None:
+            sql += " AND start_ts_ms <= ?"
+            args.append(int(end_ms))
+        if cwd:
+            sql += " AND cwd = ?"
+            args.append(cwd)
+        for term in terms:
+            sql += " AND (search_blob LIKE ? OR title LIKE ? OR cwd LIKE ?)"
+            like = f"%{term}%"
+            args.extend([like, like, like])
+        sql += order_clause + " LIMIT ? OFFSET ?"
+        args.extend([clean_limit + 1, clean_offset])
+
+        with self.lock:
+            rows = self.conn.execute(sql, args).fetchall()
+
+        items = [dict(row) for row in rows[:clean_limit]]
+        has_more = len(rows) > clean_limit
+        next_offset = clean_offset + len(items) if has_more else None
+        return {
+            "items": items,
+            "limit": clean_limit,
+            "offset": clean_offset,
+            "has_more": has_more,
+            "next_offset": next_offset,
+        }
+
     def query_projects(self, q=None, limit=DEFAULT_LIMIT):
         sql = (
             "SELECT cwd AS project, COUNT(*) AS session_count, MAX(start_ts_ms) AS last_ts_ms "
@@ -1137,6 +1401,45 @@ class Indexer:
             rows = self.conn.execute(sql, args).fetchall()
         return [dict(row) for row in rows]
 
+    def list_projects_page(self, q=None, limit=DEFAULT_PAGE_LIMIT, offset=0):
+        clean_limit, clean_offset = normalize_page_args(limit, offset)
+        sql = (
+            "SELECT cwd AS project, COUNT(*) AS session_count, MAX(start_ts_ms) AS last_ts_ms "
+            "FROM sessions WHERE cwd IS NOT NULL AND cwd <> ''"
+        )
+        args = []
+        if q:
+            sql += " AND cwd LIKE ?"
+            args.append(f"%{q}%")
+        sql += " GROUP BY cwd ORDER BY last_ts_ms DESC LIMIT ? OFFSET ?"
+        args.extend([clean_limit + 1, clean_offset])
+        with self.lock:
+            rows = self.conn.execute(sql, args).fetchall()
+
+        items = [dict(row) for row in rows[:clean_limit]]
+        has_more = len(rows) > clean_limit
+        next_offset = clean_offset + len(items) if has_more else None
+        return {
+            "items": items,
+            "limit": clean_limit,
+            "offset": clean_offset,
+            "has_more": has_more,
+            "next_offset": next_offset,
+        }
+
+    def _serialize_message_row(self, row, message_index, include_full_text=False):
+        text = str(row["text"] or "")
+        is_truncated = (not include_full_text) and len(text) > MESSAGE_INLINE_FULL_THRESHOLD
+        return {
+            "message_index": int(message_index),
+            "ts_ms": row["ts_ms"],
+            "role": row["role"],
+            "kind": row["kind"],
+            "text": text if not is_truncated else build_message_preview_text(text),
+            "char_count": len(text),
+            "is_truncated": bool(is_truncated),
+        }
+
     def get_session(self, session_id):
         with self.lock:
             session = self.conn.execute(
@@ -1151,16 +1454,117 @@ class Indexer:
             ).fetchall()
         return {
             "session": dict(session),
-            "messages": [dict(row) for row in messages],
+            "messages": [
+                self._serialize_message_row(row, idx)
+                for idx, row in enumerate(messages)
+            ],
         }
 
+    def get_session_message(self, session_id, message_index):
+        try:
+            offset = int(message_index)
+        except (TypeError, ValueError):
+            return None
+        if offset < 0:
+            return None
+
+        with self.lock:
+            session = self.conn.execute(
+                "SELECT 1 FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if not session:
+                return None
+            row = self.conn.execute(
+                """
+                SELECT ts_ms, role, kind, text
+                FROM messages
+                WHERE session_id = ?
+                ORDER BY ts_ms ASC, id ASC
+                LIMIT 1 OFFSET ?
+                """,
+                (session_id, offset),
+            ).fetchone()
+        if not row:
+            return None
+        return self._serialize_message_row(row, offset, include_full_text=True)
+
+    def search_session_messages(self, session_id, query):
+        term = str(query or "").strip()
+        result = {
+            "query": term,
+            "match_count": 0,
+            "message_match_count": 0,
+            "matches": [],
+        }
+        if not term:
+            return result
+
+        pattern = re.compile(re.escape(term), re.IGNORECASE)
+
+        with self.lock:
+            session = self.conn.execute(
+                "SELECT 1 FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if not session:
+                return None
+            rows = self.conn.execute(
+                """
+                SELECT ts_ms, role, kind, text
+                FROM messages
+                WHERE session_id = ?
+                ORDER BY ts_ms ASC, id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+
+        matches = []
+        total_hits = 0
+        for idx, row in enumerate(rows):
+            text = str(row["text"] or "")
+            found = list(pattern.finditer(text))
+            hit_count = len(found)
+            if hit_count <= 0:
+                continue
+            total_hits += hit_count
+            serialized = self._serialize_message_row(row, idx)
+            excerpt = build_search_excerpt_text(text, found[0].start(), found[0].end())
+            matches.append({
+                "message_index": idx,
+                "ts_ms": row["ts_ms"],
+                "role": row["role"],
+                "kind": row["kind"],
+                "hit_count": hit_count,
+                "char_count": serialized["char_count"],
+                "is_truncated": serialized["is_truncated"],
+                "excerpt_text": excerpt["text"],
+                "excerpt_start": excerpt["start"],
+                "excerpt_end": excerpt["end"],
+                "excerpt_has_more_before": excerpt["has_more_before"],
+                "excerpt_has_more_after": excerpt["has_more_after"],
+            })
+
+        result["match_count"] = total_hits
+        result["message_match_count"] = len(matches)
+        result["matches"] = matches
+        return result
+
     def rename_session(self, session_id, title):
+        title = str(title or "").strip()
+        if not title:
+            return False
         with self.lock:
             cur = self.conn.execute(
                 "UPDATE sessions SET title = ? WHERE id = ?", (title, session_id)
             )
             self.conn.commit()
-            return cur.rowcount > 0
+            updated = cur.rowcount > 0
+
+        if updated and self.recall_titles:
+            self.recall_titles.set_custom_title(session_id, title)
+
+        return updated
 
     def archive_session(self, session_id, archived_dir):
         with self.lock:
@@ -1317,6 +1721,7 @@ class SourceBackend:
         scan_interval,
         archived_dir,
         deleted_dir,
+        recall_db_path,
         file_filter_fn=None,
         ensure_fn=None,
     ):
@@ -1330,11 +1735,13 @@ class SourceBackend:
         self.indexer = Indexer(
             sessions_dir=self.sessions_dir,
             data_dir=Path(data_dir),
+            source=source,
             db_filename=db_filename,
             scan_interval=scan_interval,
             parse_file_fn=parse_file_fn,
             file_filter_fn=file_filter_fn,
             parser_version=parser_version,
+            recall_db_path=recall_db_path,
         )
         if self.ensure_fn is None:
             self.indexer.maybe_update_index(max_age_seconds=0)
@@ -1345,29 +1752,33 @@ class SourceBackend:
 
 
 class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, directory=None, source_backends=None, wsl_distro=None, **kwargs):
+    def __init__(self, *args, directory=None, source_backends=None, wsl_distro=None, runtime_system="windows", **kwargs):
         self._source_backends = source_backends or {}
         self._wsl_distro = wsl_distro
+        self._runtime_system = str(runtime_system or "windows").strip() or "windows"
         super().__init__(*args, directory=directory, **kwargs)
 
     def _resolve_source_request(self, path):
-        if path.startswith("/api/windows/") or path.startswith("/api/wsl/"):
-            parts = path.split("/")
-            if len(parts) >= 5:
-                system = parts[2]
-                source = parts[3]
-                backend = self._source_backends.get((system, source))
-                subpath = "/" + "/".join(parts[4:])
-                return backend, subpath
-            return None, None
-
         if path == "/api/claude" or path.startswith("/api/claude/"):
-            backend = self._source_backends.get(("windows", "claude"))
+            backend = self._source_backends.get((self._runtime_system, "claude"))
             subpath = path[len("/api/claude"):] or "/"
             return backend, subpath
 
+        if path == "/api/openclaw" or path.startswith("/api/openclaw/"):
+            backend = self._source_backends.get((self._runtime_system, "openclaw"))
+            subpath = path[len("/api/openclaw"):] or "/"
+            return backend, subpath
+
+        match = re.match(r"^/api/([^/]+)/([^/]+)(/.*)?$", path)
+        if match:
+            system = match.group(1)
+            source = match.group(2)
+            backend = self._source_backends.get((system, source))
+            subpath = match.group(3) or "/"
+            return backend, subpath
+
         if path == "/api" or path.startswith("/api/"):
-            backend = self._source_backends.get(("windows", "codex"))
+            backend = self._source_backends.get((self._runtime_system, "codex"))
             subpath = path[len("/api"):] or "/"
             return backend, subpath
 
@@ -1390,6 +1801,14 @@ class Handler(SimpleHTTPRequestHandler):
         end = -len(suffix) if suffix else None
         return unquote(source_path[len("/session/"):end])
 
+    def _extract_session_message_request(self, source_path):
+        if not source_path or not source_path.startswith("/session/"):
+            return None, None
+        match = re.match(r"^/session/([^/]+)/message/(\d+)$", source_path)
+        if not match:
+            return None, None
+        return unquote(match.group(1)), int(match.group(2))
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -1405,6 +1824,12 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.handle_sessions(parsed, backend)
             if source_path == "/projects":
                 return self.handle_projects(parsed, backend)
+            if source_path and "/message/" in source_path:
+                session_id, message_index = self._extract_session_message_request(source_path)
+                return self.handle_session_message(session_id, message_index, backend)
+            if source_path and source_path.endswith("/search"):
+                session_id = self._extract_session_id(source_path, "/search")
+                return self.handle_session_search(session_id, parsed, backend)
             if source_path and source_path.startswith("/session/"):
                 session_id = self._extract_session_id(source_path)
                 return self.handle_session(session_id, backend)
@@ -1514,6 +1939,7 @@ class Handler(SimpleHTTPRequestHandler):
         return self.send_json({
             "sources": items,
             "wsl_distro": self._wsl_distro,
+            "runtime_system": self._runtime_system,
         })
 
     def handle_sessions(self, parsed, backend):
@@ -1524,26 +1950,68 @@ class Handler(SimpleHTTPRequestHandler):
         end = params.get("end", [None])[0]
         project = params.get("project", [""])[0].strip() or None
         sort = params.get("sort", [""])[0].strip() or None
-        limit = params.get("limit", [DEFAULT_LIMIT])[0]
+        limit = params.get("limit", [DEFAULT_PAGE_LIMIT])[0]
+        offset = params.get("offset", [0])[0]
 
         start_ms = parse_date_param(start, end=False)
         end_ms = parse_date_param(end, end=True)
 
-        sessions = backend.indexer.query_sessions(q=q, start_ms=start_ms, end_ms=end_ms, limit=limit, cwd=project, sort=sort)
-        return self.send_json({"sessions": sessions})
+        page = backend.indexer.list_sessions_page(
+            q=q,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            limit=limit,
+            offset=offset,
+            cwd=project,
+            sort=sort,
+        )
+        return self.send_json({
+            "sessions": page["items"],
+            "limit": page["limit"],
+            "offset": page["offset"],
+            "has_more": page["has_more"],
+            "next_offset": page["next_offset"],
+        })
 
     def handle_projects(self, parsed, backend):
         backend.indexer.maybe_update_index()
         params = parse_qs(parsed.query)
         q = params.get("q", [""])[0].strip() or None
-        limit = params.get("limit", [DEFAULT_LIMIT])[0]
-        projects = backend.indexer.query_projects(q=q, limit=limit)
-        return self.send_json({"projects": projects})
+        limit = params.get("limit", [DEFAULT_PAGE_LIMIT])[0]
+        offset = params.get("offset", [0])[0]
+        page = backend.indexer.list_projects_page(q=q, limit=limit, offset=offset)
+        return self.send_json({
+            "projects": page["items"],
+            "limit": page["limit"],
+            "offset": page["offset"],
+            "has_more": page["has_more"],
+            "next_offset": page["next_offset"],
+        })
 
     def handle_session(self, session_id, backend):
         backend.indexer.maybe_update_index()
         data = backend.indexer.get_session(session_id)
         if not data:
+            return self.send_json({"error": "not_found"}, status=404)
+        return self.send_json(data)
+
+    def handle_session_message(self, session_id, message_index, backend):
+        if session_id is None or message_index is None:
+            return self.send_json({"error": "not_found"}, status=404)
+        backend.indexer.maybe_update_index()
+        data = backend.indexer.get_session_message(session_id, message_index)
+        if not data:
+            return self.send_json({"error": "not_found"}, status=404)
+        return self.send_json({"message": data})
+
+    def handle_session_search(self, session_id, parsed, backend):
+        if session_id is None:
+            return self.send_json({"error": "not_found"}, status=404)
+        backend.indexer.maybe_update_index()
+        params = parse_qs(parsed.query)
+        query = params.get("q", [""])[0]
+        data = backend.indexer.search_session_messages(session_id, query)
+        if data is None:
             return self.send_json({"error": "not_found"}, status=404)
         return self.send_json(data)
 
@@ -1577,13 +2045,7 @@ def main():
     openclaw_dir = Path(args.openclaw_dir).expanduser()
     data_dir = Path(args.data_dir).expanduser() if args.data_dir else Path(__file__).resolve().parent
     data_dir.mkdir(parents=True, exist_ok=True)
-
-    wsl_home = Path(f"\\\\wsl$\\{args.wsl_distro}\\home\\{args.wsl_user}")
-    wsl_codex_dir = Path(args.wsl_codex_dir) if args.wsl_codex_dir else (wsl_home / ".codex")
-    wsl_claude_dir = Path(args.wsl_claude_dir) if args.wsl_claude_dir else (wsl_home / ".claude")
-    wsl_openclaw_dir = Path(args.wsl_openclaw_dir) if args.wsl_openclaw_dir else (wsl_home / ".openclaw")
-
-    wsl_bootstrapper = WslBootstrapper(args.wsl_distro)
+    runtime_system = detect_runtime_system()
     source_backends = {}
 
     def register_source(
@@ -1598,6 +2060,9 @@ def main():
         file_filter_fn=None,
         ensure_fn=None,
     ):
+        recall_db_path = None
+        if system in ("windows", "linux") and source in ("codex", "claude"):
+            recall_db_path = Path(root_dir).parent / ".recall.db"
         source_backends[(system, source)] = SourceBackend(
             system=system,
             source=source,
@@ -1610,19 +2075,30 @@ def main():
             scan_interval=args.scan_interval,
             archived_dir=Path(root_dir) / "archived_sessions",
             deleted_dir=Path(root_dir) / "deleted_projects",
+            recall_db_path=recall_db_path,
             file_filter_fn=file_filter_fn,
             ensure_fn=ensure_fn,
         )
 
     openclaw_filter = lambda p: p.parent.name == "sessions"
     claude_filter = lambda p: not p.name.startswith("agent-")
+    if runtime_system == "windows":
+        wsl_home = Path(f"\\\\wsl$\\{args.wsl_distro}\\home\\{args.wsl_user}")
+        wsl_codex_dir = Path(args.wsl_codex_dir) if args.wsl_codex_dir else (wsl_home / ".codex")
+        wsl_claude_dir = Path(args.wsl_claude_dir) if args.wsl_claude_dir else (wsl_home / ".claude")
+        wsl_openclaw_dir = Path(args.wsl_openclaw_dir) if args.wsl_openclaw_dir else (wsl_home / ".openclaw")
+        wsl_bootstrapper = WslBootstrapper(args.wsl_distro)
 
-    register_source("windows", "codex", codex_dir, codex_dir / "sessions", "index.sqlite", parse_codex_session_file, 4)
-    register_source("windows", "claude", claude_dir, claude_dir / "projects", "index_claude.sqlite", parse_claude_session_file, 3, file_filter_fn=claude_filter)
-    register_source("windows", "openclaw", openclaw_dir, openclaw_dir / "agents", "index_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter)
-    register_source("wsl", "codex", wsl_codex_dir, wsl_codex_dir / "sessions", "index_wsl_codex.sqlite", parse_codex_session_file, 4, ensure_fn=wsl_bootstrapper.ensure)
-    register_source("wsl", "claude", wsl_claude_dir, wsl_claude_dir / "projects", "index_wsl_claude.sqlite", parse_claude_session_file, 3, file_filter_fn=claude_filter, ensure_fn=wsl_bootstrapper.ensure)
-    register_source("wsl", "openclaw", wsl_openclaw_dir, wsl_openclaw_dir / "agents", "index_wsl_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter, ensure_fn=wsl_bootstrapper.ensure)
+        register_source("windows", "codex", codex_dir, codex_dir / "sessions", "index.sqlite", parse_codex_session_file, 4)
+        register_source("windows", "claude", claude_dir, claude_dir / "projects", "index_claude.sqlite", parse_claude_session_file, 3, file_filter_fn=claude_filter)
+        register_source("windows", "openclaw", openclaw_dir, openclaw_dir / "agents", "index_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter)
+        register_source("wsl", "codex", wsl_codex_dir, wsl_codex_dir / "sessions", "index_wsl_codex.sqlite", parse_codex_session_file, 4, ensure_fn=wsl_bootstrapper.ensure)
+        register_source("wsl", "claude", wsl_claude_dir, wsl_claude_dir / "projects", "index_wsl_claude.sqlite", parse_claude_session_file, 3, file_filter_fn=claude_filter, ensure_fn=wsl_bootstrapper.ensure)
+        register_source("wsl", "openclaw", wsl_openclaw_dir, wsl_openclaw_dir / "agents", "index_wsl_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter, ensure_fn=wsl_bootstrapper.ensure)
+    else:
+        register_source("linux", "codex", codex_dir, codex_dir / "sessions", "index_linux.sqlite", parse_codex_session_file, 4)
+        register_source("linux", "claude", claude_dir, claude_dir / "projects", "index_linux_claude.sqlite", parse_claude_session_file, 3, file_filter_fn=claude_filter)
+        register_source("linux", "openclaw", openclaw_dir, openclaw_dir / "agents", "index_linux_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter)
 
     static_dir = Path(__file__).resolve().parent / "static"
 
@@ -1631,7 +2107,8 @@ def main():
             *inner_args,
             directory=str(static_dir),
             source_backends=source_backends,
-            wsl_distro=args.wsl_distro,
+            wsl_distro=args.wsl_distro if runtime_system == "windows" else None,
+            runtime_system=runtime_system,
             **inner_kwargs,
         )
 

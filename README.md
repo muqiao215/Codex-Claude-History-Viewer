@@ -1,6 +1,6 @@
 # Codex & Claude History Viewer
 
-Local-first, dependency-free web viewer for **Codex CLI** and **Claude Code** session logs.
+Local-first, dependency-free web viewer for **Codex CLI**, **Claude Code**, and **OpenClaw** session logs.
 
 - Browse sessions and projects (work dirs)
 - Search sessions by keyword + date range
@@ -49,8 +49,16 @@ By default it reads:
 
 - Codex logs: `~/.codex/sessions`
 - Claude logs: `~/.claude/projects`
+- OpenClaw logs: `~/.openclaw/agents`
 
 Indexes (SQLite) are stored next to `app.py` (the repo folder) unless you set `--data-dir`.
+
+## Runtime systems
+
+- **Windows** runtime exposes `Windows` and `WSL`
+- **Linux / Ubuntu** runtime exposes `Linux`
+
+The UI follows the runtime platform instead of assuming Windows-only tabs.
 
 ## Configuration
 
@@ -81,15 +89,48 @@ python3 app.py --data-dir ~/.cache/cchv
 python3 app.py --host 0.0.0.0 --port 8787
 
 # Custom log locations (these are the *base dirs* that contain `sessions/` and `projects/`)
-python3 app.py --codex-dir ~/.codex --claude-dir ~/.claude
+python3 app.py --codex-dir ~/.codex --claude-dir ~/.claude --openclaw-dir ~/.openclaw
 
 # Faster/slower auto-rescan (seconds)
 python3 app.py --scan-interval 2
 ```
 
+### Ubuntu / Linux
+
+Run directly:
+
+```bash
+python3 app.py \
+  --codex-dir ~/.codex \
+  --claude-dir ~/.claude \
+  --openclaw-dir ~/.openclaw \
+  --data-dir ~/.cache/cchv \
+  --host 127.0.0.1 \
+  --port 8787
+```
+
+Or use the launcher:
+
+```bash
+chmod +x ./scripts/start-cchv.sh
+./scripts/start-cchv.sh
+```
+
+Install a desktop entry on Ubuntu:
+
+```bash
+chmod +x ./scripts/install-linux-desktop-entry.sh
+./scripts/install-linux-desktop-entry.sh
+```
+
+That writes:
+
+- `~/.local/share/applications/codex-claude-history-viewer.desktop`
+
 ## Using the UI
 
-- **Source**: switch between Codex / Claude Code logs.
+- **System**: switch between the runtime systems that are actually available.
+- **Source**: switch between Codex / Claude Code / OpenClaw logs.
 - **Browse**:
   - **Sessions**: list individual sessions.
   - **Projects**: group sessions by working directory (cwd).

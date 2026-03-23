@@ -444,6 +444,12 @@ body.is-resizing {
   min-height: 0;
 }
 
+.list-footer {
+  display: flex;
+  justify-content: center;
+  min-height: 32px;
+}
+
 .session-item {
   padding: 8px;
   border-radius: 8px;
@@ -548,6 +554,25 @@ body.is-resizing {
   white-space: normal;
   font-size: 14px;
   line-height: 1.4;
+}
+
+.msg-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.msg-note {
+  font-size: 12px;
+}
+
+.msg-toggle {
+  flex-shrink: 0;
 }
 
 .session-info {

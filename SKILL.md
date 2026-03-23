@@ -1,6 +1,6 @@
 ---
 name: codex-claude-history-viewer
-description: Use when users ask to browse or search local Codex and Claude session history, work around /resume project scope limits, run a local history UI on Windows, or assess and extend CCHV for local CRUD-style session management.
+description: Use when users ask to browse or search local Codex, Claude Code, or OpenClaw session history, work around /resume project scope limits, run a local history UI on Windows or Ubuntu/Linux, or assess and extend CCHV for local CRUD-style session management.
 ---
 
 # Codex Claude History Viewer
@@ -10,6 +10,7 @@ Use this skill for local session history workflows with:
 - `The-Zombie0/Codex-Claude-History-Viewer`
 - Codex logs: `~/.codex/sessions`
 - Claude logs: `~/.claude/projects`
+- OpenClaw logs: `~/.openclaw/agents`
 
 ## 1) Confirm Current Capability First
 
@@ -35,6 +36,7 @@ From repo directory:
 python .\app.py `
   --codex-dir C:\Users\11614\.codex `
   --claude-dir C:\Users\11614\.claude `
+  --openclaw-dir C:\Users\11614\.openclaw `
   --data-dir E:\cchv-data `
   --host 127.0.0.1 `
   --port 8787
@@ -45,16 +47,44 @@ Open `http://127.0.0.1:8787`.
 You can also use:
 
 ```powershell
-.\scripts\start-cchv.ps1 -CodexDir C:\Users\11614\.codex -ClaudeDir C:\Users\11614\.claude -DataDir E:\cchv-data
+.\scripts\start-cchv.ps1 -CodexDir C:\Users\11614\.codex -ClaudeDir C:\Users\11614\.claude -OpenClawDir C:\Users\11614\.openclaw -DataDir E:\cchv-data
 ```
 
-## 3) Default Working Rules
+## 3) Run on Ubuntu / Linux
+
+From repo directory:
+
+```bash
+python3 ./app.py \
+  --codex-dir ~/.codex \
+  --claude-dir ~/.claude \
+  --openclaw-dir ~/.openclaw \
+  --data-dir ~/.cache/cchv \
+  --host 127.0.0.1 \
+  --port 8787
+```
+
+Or use the bundled launcher:
+
+```bash
+chmod +x ./scripts/start-cchv.sh
+./scripts/start-cchv.sh
+```
+
+Install an Ubuntu desktop entry:
+
+```bash
+chmod +x ./scripts/install-linux-desktop-entry.sh
+./scripts/install-linux-desktop-entry.sh
+```
+
+## 4) Default Working Rules
 
 - Keep service bound to `127.0.0.1` unless user explicitly asks LAN access.
 - Do not mutate raw `.jsonl` session files unless user explicitly requests destructive changes.
 - Prefer "soft management" first (metadata/tag/archive layer), then optional hard delete.
 
-## 4) If User Wants CRUD
+## 5) If User Wants CRUD
 
 Use a safe, incremental plan:
 

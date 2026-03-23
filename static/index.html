@@ -13,16 +13,9 @@
         <div class="brand">
           <div class="brand-title">History Viewer</div>
           <div class="label">System</div>
-          <div class="tabs" role="tablist" aria-label="System">
-            <button type="button" class="tab active" data-system="windows" role="tab" aria-selected="true">Windows</button>
-            <button type="button" class="tab" data-system="wsl" role="tab" aria-selected="false">WSL</button>
-          </div>
+          <div id="systemTabs" class="tabs" role="tablist" aria-label="System"></div>
           <div class="label">Source</div>
-          <div class="tabs" role="tablist" aria-label="Source">
-            <button type="button" class="tab active" data-source="codex" role="tab" aria-selected="true">Codex</button>
-            <button type="button" class="tab" data-source="claude" role="tab" aria-selected="false">Claude Code</button>
-            <button type="button" class="tab" data-source="openclaw" role="tab" aria-selected="false">OpenClaw</button>
-          </div>
+          <div id="sourceTabs" class="tabs" role="tablist" aria-label="Source"></div>
         </div>
 
         <div class="card">
@@ -96,6 +89,9 @@
           </div>
         </div>
         <div id="sessionList" class="session-list"></div>
+        <div id="listFooter" class="list-footer">
+          <button type="button" id="listLoadMore" class="btn small" style="display:none">Load more</button>
+        </div>
       </div>
     </aside>
 
@@ -117,12 +113,12 @@
             <button id="copyResumeId" type="button" class="btn small">Copy</button>
           </div>
           <div class="info-row">
-            <div class="info-label">Resume PS</div>
+            <div id="resumeCmdPrimaryLabel" class="info-label">Resume PS</div>
             <div id="resumeCmdPs" class="info-value code">-</div>
             <button id="copyResumeCmdPs" type="button" class="btn small">Copy</button>
           </div>
           <div class="info-row">
-            <div class="info-label">Resume WSL</div>
+            <div id="resumeCmdSecondaryLabel" class="info-label">Resume WSL</div>
             <div id="resumeCmdWsl" class="info-value code">-</div>
             <button id="copyResumeCmdWsl" type="button" class="btn small">Copy</button>
           </div>

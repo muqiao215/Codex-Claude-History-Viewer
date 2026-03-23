@@ -5,6 +5,10 @@ const resultCountEl = document.getElementById("resultCount");
 const resultsLabelEl = document.getElementById("resultsLabel");
 const sessionSortWrapEl = document.getElementById("sessionSortWrap");
 const sessionSortEl = document.getElementById("sessionSort");
+const systemTabsEl = document.getElementById("systemTabs");
+const sourceTabsEl = document.getElementById("sourceTabs");
+const listFooterEl = document.getElementById("listFooter");
+const listLoadMoreBtn = document.getElementById("listLoadMore");
 const searchForm = document.getElementById("searchForm");
 const keywordInput = document.getElementById("q");
 const startInput = document.getElementById("start");
@@ -22,6 +26,8 @@ const copyWorkdirBtn = document.getElementById("copyWorkdir");
 const copyResumeIdBtn = document.getElementById("copyResumeId");
 const copyResumeCmdPsBtn = document.getElementById("copyResumeCmdPs");
 const copyResumeCmdWslBtn = document.getElementById("copyResumeCmdWsl");
+const resumeCmdPrimaryLabelEl = document.getElementById("resumeCmdPrimaryLabel");
+const resumeCmdSecondaryLabelEl = document.getElementById("resumeCmdSecondaryLabel");
 const sessionActionsEl = document.getElementById("sessionActions");
 const pinSessionBtn = document.getElementById("pinSession");
 const renameSessionBtn = document.getElementById("renameSession");
@@ -40,7 +46,7 @@ const codeThemeButtons = document.querySelectorAll("[data-code-theme]");
 
 let currentSession = null;
 let currentMessages = [];
-let currentSystem = "windows"; // "windows" | "wsl"
+let currentSystem = "windows";
 let currentSource = "codex"; // "codex" | "claude" | "openclaw"
 let browseMode = "sessions"; // "sessions" | "projects"
 let currentProject = null; // string (cwd)
@@ -48,12 +54,55 @@ let currentMarks = [];
 let activeMarkIndex = -1;
 let lastSessionTerm = "";
 let listReloadTimer = null;
+let sessionSearchTimer = null;
 let sessionsFetchSeq = 0;
 let projectsFetchSeq = 0;
 let sessionFetchSeq = 0;
+let sessionSearchFetchSeq = 0;
+let messageRenderSeq = 0;
 let currentCodeTheme = "light";
 let currentSessionSort = "start"; // "start" | "last"
-const WSL_DISTRO = "Ubuntu-22.04";
+let expandedMessageIndexes = new Set();
+let currentSessionSearch = createEmptySessionSearchState();
+let currentListItems = [];
+let currentListHasMore = false;
+let currentListNextOffset = 0;
+let currentListLoadingMore = false;
+let runtimeSystem = "windows";
+let currentWslDistro = "Ubuntu-22.04";
+let availableSystems = ["windows", "wsl", "linux"];
+let availableSourcesBySystem = new Map([
+  ["windows", ["codex", "claude", "openclaw"]],
+  ["wsl", ["codex", "claude", "openclaw"]],
+  ["linux", ["codex", "claude", "openclaw"]],
+]);
+const SYSTEM_ORDER = ["windows", "wsl", "linux"];
+const SOURCE_ORDER = ["codex", "claude", "openclaw"];
+const LIST_RELOAD_DEBOUNCE_MS = 200;
+const SESSION_SEARCH_DEBOUNCE_MS = 220;
+const MESSAGE_RENDER_BATCH_SIZE = 20;
+const MESSAGE_COLLAPSE_THRESHOLD = 12_000;
+const MESSAGE_PREVIEW_CHARS = 4_000;
+const SESSION_LIST_PAGE_LIMIT = 50;
+const PROJECT_LIST_PAGE_LIMIT = 40;
+const MARKDOWN_CACHE_INDEX_KEY = "historyViewer.markdownCache.v1.index";
+const MARKDOWN_CACHE_ENTRY_PREFIX = "historyViewer.markdownCache.v1.entry.";
+const MARKDOWN_CACHE_MAX_ENTRIES = 80;
+const MARKDOWN_CACHE_MAX_TOTAL_CHARS = 2_500_000;
+const MARKDOWN_CACHE_MAX_ENTRY_CHARS = 160_000;
+const messageRenderCache = new WeakMap();
+let markdownCacheIndex = null;
+
+function createEmptySessionSearchState(query = "") {
+  return {
+    query,
+    matches: new Map(),
+    matchCount: 0,
+    messageMatchCount: 0,
+    loading: false,
+    error: "",
+  };
+}
 
 const UI_STORAGE_KEYS = {
   roleFilters: "historyViewer.ui.roleFilters",
@@ -80,6 +129,23 @@ const LAYOUT_LIMITS = {
 
 function apiBase() {
   return `/api/${currentSystem}/${currentSource}`;
+}
+
+function getSystemLabel(system = currentSystem) {
+  if (system === "wsl") return "WSL";
+  if (system === "linux") return "Linux";
+  return "Windows";
+}
+
+function getAvailableSystems() {
+  return Array.isArray(availableSystems) && availableSystems.length > 0
+    ? availableSystems
+    : [runtimeSystem || "windows"];
+}
+
+function getAvailableSources(system = currentSystem) {
+  const items = availableSourcesBySystem.get(system);
+  return Array.isArray(items) && items.length > 0 ? items : ["codex"];
 }
 
 function formatTime(ms) {
@@ -164,10 +230,72 @@ function getSourceLabel(source = currentSource) {
   return "Codex";
 }
 
+function getResumeCommandLabels(system = currentSystem) {
+  if (system === "linux") {
+    return {
+      primary: "Resume Shell",
+      secondary: "Resume Plain",
+    };
+  }
+  return {
+    primary: "Resume PS",
+    secondary: "Resume WSL",
+  };
+}
+
+function renderSystemTabs() {
+  if (!systemTabsEl) return;
+  systemTabsEl.innerHTML = "";
+  getAvailableSystems().forEach((system) => {
+    const btn = document.createElement("button");
+    const active = system === currentSystem;
+    btn.type = "button";
+    btn.className = `tab${active ? " active" : ""}`;
+    btn.dataset.system = system;
+    btn.setAttribute("role", "tab");
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+    btn.textContent = getSystemLabel(system);
+    systemTabsEl.appendChild(btn);
+  });
+}
+
+function renderSourceTabs() {
+  if (!sourceTabsEl) return;
+  sourceTabsEl.innerHTML = "";
+  getAvailableSources().forEach((source) => {
+    const btn = document.createElement("button");
+    const active = source === currentSource;
+    btn.type = "button";
+    btn.className = `tab${active ? " active" : ""}`;
+    btn.dataset.source = source;
+    btn.setAttribute("role", "tab");
+    btn.setAttribute("aria-selected", active ? "true" : "false");
+    btn.textContent = getSourceLabel(source);
+    sourceTabsEl.appendChild(btn);
+  });
+}
+
+function updateResumeCommandLabels() {
+  const labels = getResumeCommandLabels(currentSystem);
+  if (resumeCmdPrimaryLabelEl) resumeCmdPrimaryLabelEl.textContent = labels.primary;
+  if (resumeCmdSecondaryLabelEl) resumeCmdSecondaryLabelEl.textContent = labels.secondary;
+}
+
+function normalizeSystem(system) {
+  const allowed = new Set(getAvailableSystems());
+  const fallback = allowed.has(runtimeSystem) ? runtimeSystem : (getAvailableSystems()[0] || "windows");
+  return allowed.has(system) ? system : fallback;
+}
+
+function normalizeSource(source, system = currentSystem) {
+  const allowed = getAvailableSources(system);
+  return allowed.includes(source) ? source : (allowed[0] || "codex");
+}
+
 function buildResumeInvocation(system, source, sessionId) {
   if (!sessionId || sessionId === "-") return "";
   if (source === "codex") return `codex resume ${sessionId}`;
-  if (source === "claude" && system === "windows") return `claude -r ${sessionId}`;
+  if (source === "claude") return `claude -r ${sessionId}`;
   return "";
 }
 
@@ -182,9 +310,16 @@ function buildResumeCommands(system, source, cwd, sessionId) {
       ? `source ~/.bashrc >/dev/null 2>&1; cd ${quoteShell(cwd)} && ${command}`
       : `source ~/.bashrc >/dev/null 2>&1; ${command}`;
     return {
-      ps: `wsl.exe -d ${WSL_DISTRO} -- bash -lc ${quotePowerShellDouble(shellCommand)}`,
+      ps: `wsl.exe -d ${currentWslDistro} -- bash -lc ${quotePowerShellDouble(shellCommand)}`,
       wsl: shellCommand,
     };
+  }
+
+  if (system === "linux") {
+    const shell = cwd
+      ? `cd ${quoteShell(cwd)} && ${command}`
+      : command;
+    return { ps: shell, wsl: command };
   }
 
   const ps = cwd && isWindowsPath(cwd)
@@ -226,6 +361,162 @@ function safeJsonParse(raw) {
   } catch {
     return null;
   }
+}
+
+function hashString(input) {
+  const text = String(input || "");
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function loadMarkdownCacheIndex() {
+  if (markdownCacheIndex) return markdownCacheIndex;
+  const fallback = { entries: [] };
+  try {
+    const parsed = safeJsonParse(localStorage.getItem(MARKDOWN_CACHE_INDEX_KEY));
+    if (!parsed || !Array.isArray(parsed.entries)) {
+      markdownCacheIndex = fallback;
+      return markdownCacheIndex;
+    }
+    markdownCacheIndex = {
+      entries: parsed.entries.filter((entry) =>
+        entry
+        && typeof entry.key === "string"
+        && Number.isFinite(entry.size)
+        && Number.isFinite(entry.at)
+      ),
+    };
+    return markdownCacheIndex;
+  } catch {
+    markdownCacheIndex = fallback;
+    return markdownCacheIndex;
+  }
+}
+
+function persistMarkdownCacheIndex() {
+  if (!markdownCacheIndex) return;
+  try {
+    localStorage.setItem(MARKDOWN_CACHE_INDEX_KEY, JSON.stringify(markdownCacheIndex));
+  } catch {
+    // ignore
+  }
+}
+
+function touchMarkdownCacheEntry(cacheKey, size) {
+  const index = loadMarkdownCacheIndex();
+  const next = {
+    key: cacheKey,
+    size: Math.max(0, Number(size) || 0),
+    at: Date.now(),
+  };
+  index.entries = index.entries.filter((entry) => entry.key !== cacheKey);
+  index.entries.unshift(next);
+}
+
+function pruneMarkdownCacheIndex() {
+  const index = loadMarkdownCacheIndex();
+  let total = 0;
+  const kept = [];
+  index.entries.forEach((entry) => {
+    if (!entry || typeof entry.key !== "string") return;
+    if (kept.length >= MARKDOWN_CACHE_MAX_ENTRIES) {
+      try {
+        localStorage.removeItem(entry.key);
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    if (total + entry.size > MARKDOWN_CACHE_MAX_TOTAL_CHARS) {
+      try {
+        localStorage.removeItem(entry.key);
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    kept.push(entry);
+    total += entry.size;
+  });
+  index.entries = kept;
+  persistMarkdownCacheIndex();
+}
+
+function readPersistentMarkdownCache(cacheKey) {
+  try {
+    const value = localStorage.getItem(cacheKey);
+    if (typeof value !== "string" || !value) return null;
+    touchMarkdownCacheEntry(cacheKey, value.length);
+    persistMarkdownCacheIndex();
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function writePersistentMarkdownCache(cacheKey, html) {
+  const value = String(html || "");
+  if (!value || value.length > MARKDOWN_CACHE_MAX_ENTRY_CHARS) return;
+  try {
+    localStorage.setItem(cacheKey, value);
+    touchMarkdownCacheEntry(cacheKey, value.length);
+    pruneMarkdownCacheIndex();
+  } catch {
+    const index = loadMarkdownCacheIndex();
+    index.entries = index.entries.filter((entry) => entry.key !== cacheKey);
+    pruneMarkdownCacheIndex();
+    try {
+      localStorage.setItem(cacheKey, value);
+      touchMarkdownCacheEntry(cacheKey, value.length);
+      pruneMarkdownCacheIndex();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function buildMessageMarkdownCacheKey(msg, mode, text) {
+  const renderedText = String(text || "");
+  const sessionId = currentSession?.id || "";
+  const messageIndex = Number.isInteger(msg?.message_index) ? msg.message_index : -1;
+  const scope = [
+    currentSystem || "",
+    currentSource || "",
+    sessionId,
+    msg?.role || "",
+    msg?.kind || "",
+    String(messageIndex),
+    mode || "full",
+    String(renderedText.length),
+    hashString(renderedText),
+  ].join("|");
+  return `${MARKDOWN_CACHE_ENTRY_PREFIX}${hashString(scope)}.${renderedText.length}.${hashString(renderedText)}`;
+}
+
+function getOrRenderMarkdownHtml(cacheKey, text) {
+  if (cacheKey) {
+    const persisted = readPersistentMarkdownCache(cacheKey);
+    if (typeof persisted === "string") return persisted;
+  }
+  const html = renderMarkdown(text);
+  if (cacheKey) {
+    writePersistentMarkdownCache(cacheKey, html);
+  }
+  return html;
+}
+
+function getSearchExcerptHtml(msg, searchMatch) {
+  const excerptText = typeof searchMatch?.excerpt_text === "string" ? searchMatch.excerpt_text : "";
+  if (!excerptText) return "";
+  const excerptStart = Number.isFinite(searchMatch?.excerpt_start) ? searchMatch.excerpt_start : 0;
+  const excerptEnd = Number.isFinite(searchMatch?.excerpt_end) ? searchMatch.excerpt_end : excerptText.length;
+  const cacheMode = `search:${excerptStart}:${excerptEnd}`;
+  const cacheKey = buildMessageMarkdownCacheKey(msg, cacheMode, excerptText);
+  return getOrRenderMarkdownHtml(cacheKey, excerptText);
 }
 
 function setCodeTheme(theme, { persist } = { persist: false }) {
@@ -284,37 +575,33 @@ function applyStoredSessionSort() {
   setSessionSort(saved || "start", { persist: false });
 }
 
-function syncTabState(selector, key, value) {
-  document.querySelectorAll(selector).forEach((btn) => {
-    const active = btn.dataset[key] === value;
-    btn.classList.toggle("active", active);
-    btn.setAttribute("aria-selected", active ? "true" : "false");
-  });
-}
-
 function setCurrentSystem(system, { persist } = { persist: false }) {
-  const allowed = new Set(["windows", "wsl"]);
-  const next = allowed.has(system) ? system : "windows";
+  const next = normalizeSystem(system);
   currentSystem = next;
-  syncTabState("[data-system]", "system", currentSystem);
-  if (!persist) return;
-  try {
-    localStorage.setItem(UI_STORAGE_KEYS.system, currentSystem);
-  } catch {
-    // ignore
+  currentSource = normalizeSource(currentSource, currentSystem);
+  renderSystemTabs();
+  renderSourceTabs();
+  updateResumeCommandLabels();
+  if (persist) {
+    try {
+      localStorage.setItem(UI_STORAGE_KEYS.system, currentSystem);
+      localStorage.setItem(UI_STORAGE_KEYS.source, currentSource);
+    } catch {
+      // ignore
+    }
   }
 }
 
 function setCurrentSource(source, { persist } = { persist: false }) {
-  const allowed = new Set(["codex", "claude", "openclaw"]);
-  const next = allowed.has(source) ? source : "codex";
+  const next = normalizeSource(source, currentSystem);
   currentSource = next;
-  syncTabState("[data-source]", "source", currentSource);
-  if (!persist) return;
-  try {
-    localStorage.setItem(UI_STORAGE_KEYS.source, currentSource);
-  } catch {
-    // ignore
+  renderSourceTabs();
+  if (persist) {
+    try {
+      localStorage.setItem(UI_STORAGE_KEYS.source, currentSource);
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -328,8 +615,56 @@ function applyStoredSourceContext() {
     savedSystem = null;
     savedSource = null;
   }
-  setCurrentSystem(savedSystem || "windows", { persist: false });
-  setCurrentSource(savedSource || "codex", { persist: false });
+  setCurrentSystem(savedSystem || runtimeSystem, { persist: false });
+  setCurrentSource(savedSource || currentSource, { persist: false });
+}
+
+function sortByKnownOrder(values, order) {
+  const known = order.filter((item) => values.includes(item));
+  const extra = values.filter((item) => !known.includes(item)).sort();
+  return known.concat(extra);
+}
+
+async function loadSourceCatalog() {
+  try {
+    const res = await fetch("/api/sources");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const nextRuntimeSystem = typeof data.runtime_system === "string" ? data.runtime_system : runtimeSystem;
+    const nextSystems = [];
+    const nextSourcesBySystem = new Map();
+
+    (data.sources || []).forEach((item) => {
+      const system = String(item?.system || "").trim();
+      const source = String(item?.source || "").trim();
+      if (!system || !source) return;
+      if (!nextSystems.includes(system)) nextSystems.push(system);
+      const existing = nextSourcesBySystem.get(system) || [];
+      if (!existing.includes(source)) {
+        existing.push(source);
+        nextSourcesBySystem.set(system, existing);
+      }
+    });
+
+    runtimeSystem = nextRuntimeSystem;
+    if (typeof data.wsl_distro === "string" && data.wsl_distro.trim()) {
+      currentWslDistro = data.wsl_distro.trim();
+    }
+    availableSystems = sortByKnownOrder(nextSystems, SYSTEM_ORDER);
+    if (availableSystems.length === 0) {
+      availableSystems = [runtimeSystem];
+    }
+    availableSourcesBySystem = new Map();
+    nextSourcesBySystem.forEach((sources, system) => {
+      availableSourcesBySystem.set(system, sortByKnownOrder(sources, SOURCE_ORDER));
+    });
+  } catch {
+    runtimeSystem = normalizeSystem(runtimeSystem);
+  }
+
+  renderSystemTabs();
+  renderSourceTabs();
+  updateResumeCommandLabels();
 }
 
 function applyRoleFiltersFromStorage(roleInputs) {
@@ -900,6 +1235,16 @@ function formatSessionMeta(session) {
   return timeRange ? `${timeRange} • ${msgCount} msgs` : `${msgCount} msgs`;
 }
 
+function updateListFooter() {
+  if (!listFooterEl || !listLoadMoreBtn) return;
+  const count = currentListItems.length;
+  resultCountEl.textContent = currentListHasMore ? `${count}+` : `${count}`;
+  listFooterEl.style.display = currentListHasMore || currentListLoadingMore ? "flex" : "none";
+  listLoadMoreBtn.style.display = currentListHasMore || currentListLoadingMore ? "inline-flex" : "none";
+  listLoadMoreBtn.disabled = currentListLoadingMore;
+  listLoadMoreBtn.textContent = currentListLoadingMore ? "Loading..." : "Load more";
+}
+
 function renderSessions(sessions) {
   const sorted = sortSessionsForSidebar(sessions);
   sessionListEl.innerHTML = "";
@@ -917,6 +1262,7 @@ function renderSessions(sessions) {
     const item = document.createElement("div");
     item.className = "session-item";
     if (session.pinned) item.classList.add("pinned");
+    if (currentSession?.id && currentSession.id === session.id) item.classList.add("active");
     item.dataset.sessionId = session.id;
     const pinIcon = session.pinned ? '<span class="pin-icon">📌</span>' : '';
     item.innerHTML = `
@@ -925,7 +1271,6 @@ function renderSessions(sessions) {
     `;
     sessionListEl.appendChild(item);
   });
-  resultCountEl.textContent = sorted.length;
 }
 
 function renderProjects(projects) {
@@ -940,76 +1285,209 @@ function renderProjects(projects) {
     `;
     sessionListEl.appendChild(item);
   });
-  resultCountEl.textContent = projects.length;
+}
+
+function cancelPendingMessageRender() {
+  if (sessionSearchTimer) {
+    clearTimeout(sessionSearchTimer);
+    sessionSearchTimer = null;
+  }
+  messageRenderSeq += 1;
+}
+
+function buildCollapsedPreviewText(text) {
+  const value = String(text || "");
+  if (value.length <= MESSAGE_COLLAPSE_THRESHOLD) return value;
+
+  let preview = value.slice(0, MESSAGE_PREVIEW_CHARS);
+  const lastNewline = preview.lastIndexOf("\n");
+  if (lastNewline >= Math.floor(MESSAGE_PREVIEW_CHARS * 0.6)) {
+    preview = preview.slice(0, lastNewline);
+  }
+
+  const fenceCount = (preview.match(/```/g) || []).length;
+  if (fenceCount % 2 === 1) {
+    preview += "\n```";
+  }
+
+  return `${preview}\n\n---\nPreview truncated for performance. Expand to render the full message.`;
+}
+
+function getMessageRenderData(msg) {
+  let cached = messageRenderCache.get(msg);
+  if (cached) return cached;
+
+  const renderedText = humanizeToolUseMessage(msg) || "";
+  const serverPreviewPending = !!msg?.is_truncated && !msg?.full_text_loaded;
+  const charCount = Number.isFinite(msg?.char_count) ? msg.char_count : renderedText.length;
+  const collapsible = serverPreviewPending || renderedText.length > MESSAGE_COLLAPSE_THRESHOLD;
+  cached = {
+    charCount,
+    collapsible,
+    serverPreviewPending,
+    fullText: renderedText,
+    previewText: serverPreviewPending
+      ? renderedText
+      : (collapsible ? buildCollapsedPreviewText(renderedText) : renderedText),
+    fullCacheKey: buildMessageMarkdownCacheKey(msg, "full", renderedText),
+    previewCacheKey: null,
+    fullHtml: null,
+    previewHtml: null,
+  };
+  cached.previewCacheKey = buildMessageMarkdownCacheKey(msg, "preview", cached.previewText);
+  messageRenderCache.set(msg, cached);
+  return cached;
+}
+
+function getMessageHtml(msg, expanded) {
+  const cached = getMessageRenderData(msg);
+  if (!cached.collapsible || expanded) {
+    if (cached.fullHtml === null) {
+      cached.fullHtml = getOrRenderMarkdownHtml(cached.fullCacheKey, cached.fullText);
+    }
+    return cached.fullHtml;
+  }
+  if (cached.previewHtml === null) {
+    cached.previewHtml = getOrRenderMarkdownHtml(cached.previewCacheKey, cached.previewText);
+  }
+  return cached.previewHtml;
+}
+
+function getMessageBodyHtml(msg, { expanded = false, searchMatch = null } = {}) {
+  const cached = getMessageRenderData(msg);
+  const hasSearchExcerpt = !!(
+    !expanded
+    && cached.collapsible
+    && typeof searchMatch?.excerpt_text === "string"
+    && searchMatch.excerpt_text
+  );
+  if (hasSearchExcerpt) {
+    return {
+      html: getSearchExcerptHtml(msg, searchMatch),
+      mode: "search-excerpt",
+    };
+  }
+  return {
+    html: getMessageHtml(msg, expanded),
+    mode: !cached.collapsible || expanded ? "full" : "preview",
+  };
+}
+
+function getSessionSearchMatch(index, term) {
+  if (!term) return null;
+  if (currentSessionSearch.query !== term) return null;
+  return currentSessionSearch.matches.get(index) || null;
+}
+
+function buildMessageElement(msg, index, term) {
+  const roleClass = roleToClass(msg.role);
+  const cached = getMessageRenderData(msg);
+  const expandedByUser = expandedMessageIndexes.has(index);
+  const searchMatch = getSessionSearchMatch(index, term);
+  const expanded = !cached.collapsible || expandedByUser;
+
+  const wrapper = document.createElement("div");
+  wrapper.className = `msg ${roleClass}`;
+  if (msg.kind === "agent_reasoning" || msg.kind === "reasoning_summary") {
+    wrapper.classList.add("thinking");
+  }
+  const trimmedText = (msg.text || "").trim();
+  if (trimmedText === "[Request interrupted by user]") {
+    wrapper.classList.add("interrupted");
+  }
+  const turnTagMatch = trimmedText.match(/^<turn_([a-zA-Z0-9_-]+)>/i);
+  if (turnTagMatch) {
+    const turnKind = turnTagMatch[1].toLowerCase();
+    if (turnKind === "aborted" || turnKind === "interrupted" || turnKind === "canceled" || turnKind === "cancelled") {
+      wrapper.classList.add("interrupted");
+    } else {
+      wrapper.classList.add("error");
+    }
+  }
+  if (msg.kind === "tool_result") {
+    const isToolError = trimmedText.includes("Status: error")
+      || /\bHTTP\s+(4\d\d|5\d\d)\b/.test(trimmedText)
+      || /\bTraceback\b/.test(trimmedText)
+      || /\bException\b/.test(trimmedText)
+      || /\bECONN\w*\b/i.test(trimmedText)
+      || /\bEPIPE\b/i.test(trimmedText);
+    if (isToolError) wrapper.classList.add("error");
+  }
+
+  const label = kindLabel(msg.kind) || msg.role;
+  const header = document.createElement("div");
+  header.className = "msg-header";
+  header.textContent = `${label} ? ${formatTime(msg.ts_ms)}`;
+
+  const body = document.createElement("div");
+  body.className = "msg-body";
+  const bodyRender = getMessageBodyHtml(msg, { expanded, searchMatch });
+  const showingSearchExcerpt = bodyRender.mode === "search-excerpt";
+  body.innerHTML = bodyRender.html;
+
+  wrapper.appendChild(header);
+  wrapper.appendChild(body);
+
+  let hits = 0;
+  if (term && searchMatch) {
+    hits = highlightElement(body, term);
+  }
+
+  if (cached.collapsible) {
+    const controls = document.createElement("div");
+    controls.className = "msg-controls";
+
+    const note = document.createElement("div");
+    note.className = "msg-note muted";
+    if (showingSearchExcerpt) {
+      const excerptStart = Number.isFinite(searchMatch?.excerpt_start) ? searchMatch.excerpt_start : 0;
+      const excerptEnd = Number.isFinite(searchMatch?.excerpt_end) ? searchMatch.excerpt_end : excerptStart;
+      const shownChars = Math.max(0, excerptEnd - excerptStart);
+      note.textContent = `Search hit excerpt. Showing ${shownChars.toLocaleString()} of ${cached.charCount.toLocaleString()} chars near the match.`;
+    } else if (cached.serverPreviewPending) {
+      note.textContent = `Previewing ${Math.min((msg.text || "").length, cached.charCount).toLocaleString()} of ${cached.charCount.toLocaleString()} chars. Expand to fetch the full message.`;
+    } else if (expanded) {
+      note.textContent = `Long message. ${cached.charCount.toLocaleString()} chars rendered.`;
+    } else {
+      note.textContent = `Previewing ${Math.min(MESSAGE_PREVIEW_CHARS, cached.charCount).toLocaleString()} of ${cached.charCount.toLocaleString()} chars.`;
+    }
+    controls.appendChild(note);
+
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "btn small msg-toggle";
+    toggle.dataset.messageToggle = String(index);
+    if (cached.serverPreviewPending && !expanded) {
+      toggle.textContent = "Load full message";
+    } else {
+      toggle.textContent = expanded ? "Collapse long message" : "Expand full message";
+    }
+    controls.appendChild(toggle);
+
+    wrapper.appendChild(controls);
+  }
+
+  return { wrapper, hits };
 }
 
 function renderMessages(messages) {
+  cancelPendingMessageRender();
+  const renderSeq = messageRenderSeq;
   messagesEl.innerHTML = "";
   const roleFilters = getRoleFilters();
   const term = sessionSearchInput.value.trim();
-  let matchCount = 0;
-  let messageMatchCount = 0;
-  let renderedCount = 0;
   currentMarks = [];
   activeMarkIndex = -1;
+  prevMatchBtn.disabled = true;
+  nextMatchBtn.disabled = true;
 
-  messages.forEach((msg) => {
+  const visibleMessages = [];
+  messages.forEach((msg, index) => {
     const roleClass = roleToClass(msg.role);
-    if (!roleFilters[roleClass]) {
-      return;
-    }
-    renderedCount += 1;
-
-    const wrapper = document.createElement("div");
-    wrapper.className = `msg ${roleClass}`;
-    if (msg.kind === "agent_reasoning" || msg.kind === "reasoning_summary") {
-      wrapper.classList.add("thinking");
-    }
-    const trimmedText = (msg.text || "").trim();
-    if (trimmedText === "[Request interrupted by user]") {
-      wrapper.classList.add("interrupted");
-    }
-    const turnTagMatch = trimmedText.match(/^<turn_([a-zA-Z0-9_-]+)>/i);
-    if (turnTagMatch) {
-      const turnKind = turnTagMatch[1].toLowerCase();
-      if (turnKind === "aborted" || turnKind === "interrupted" || turnKind === "canceled" || turnKind === "cancelled") {
-        wrapper.classList.add("interrupted");
-      } else {
-        wrapper.classList.add("error");
-      }
-    }
-    if (msg.kind === "tool_result") {
-      const isToolError = trimmedText.includes("Status: error")
-        || /\bHTTP\s+(4\d\d|5\d\d)\b/.test(trimmedText)
-        || /\bTraceback\b/.test(trimmedText)
-        || /\bException\b/.test(trimmedText)
-        || /\bECONN\w*\b/i.test(trimmedText)
-        || /\bEPIPE\b/i.test(trimmedText);
-      if (isToolError) wrapper.classList.add("error");
-    }
-
-    const label = kindLabel(msg.kind) || msg.role;
-    const header = document.createElement("div");
-    header.className = "msg-header";
-    header.textContent = `${label} • ${formatTime(msg.ts_ms)}`;
-
-    const body = document.createElement("div");
-    body.className = "msg-body";
-    const renderedText = humanizeToolUseMessage(msg);
-    body.innerHTML = renderMarkdown(renderedText || "");
-
-    wrapper.appendChild(header);
-    wrapper.appendChild(body);
-    messagesEl.appendChild(wrapper);
-
-    if (term) {
-      const hits = highlightElement(body, term);
-      if (hits > 0) {
-        messageMatchCount += 1;
-        matchCount += hits;
-      }
-    }
+    if (!roleFilters[roleClass]) return;
+    visibleMessages.push({ msg, index });
   });
+  const renderedCount = visibleMessages.length;
 
   if (renderedCount === 0) {
     const empty = document.createElement("div");
@@ -1018,16 +1496,70 @@ function renderMessages(messages) {
       ? "No messages match the current role filters."
       : "No messages in this session.";
     messagesEl.appendChild(empty);
+    if (term) {
+      if (currentSessionSearch.query === term) {
+        if (currentSessionSearch.loading) {
+          sessionSearchCount.textContent = "Searching...";
+        } else if (currentSessionSearch.error) {
+          sessionSearchCount.textContent = currentSessionSearch.error;
+        } else {
+          sessionSearchCount.textContent = `${currentSessionSearch.matchCount} matches in ${currentSessionSearch.messageMatchCount} messages`;
+        }
+      } else {
+        sessionSearchCount.textContent = "Searching...";
+      }
+    } else {
+      sessionSearchCount.textContent = "";
+    }
+    updateMatchNavState(term);
+    return;
   }
 
   if (term) {
-    currentMarks = Array.from(messagesEl.querySelectorAll("mark"));
-    sessionSearchCount.textContent = `${matchCount} matches in ${messageMatchCount} messages`;
+    sessionSearchCount.textContent = currentSessionSearch.loading ? "Searching..." : "Rendering...";
   } else {
     sessionSearchCount.textContent = "";
   }
 
-  updateMatchNavState(term);
+  let offset = 0;
+  const renderBatch = () => {
+    if (renderSeq !== messageRenderSeq) return;
+
+    const fragment = document.createDocumentFragment();
+    const batchEnd = Math.min(offset + MESSAGE_RENDER_BATCH_SIZE, renderedCount);
+    for (; offset < batchEnd; offset += 1) {
+      const { msg, index } = visibleMessages[offset];
+      const rendered = buildMessageElement(msg, index, term);
+      fragment.appendChild(rendered.wrapper);
+    }
+    messagesEl.appendChild(fragment);
+
+    if (offset < renderedCount) {
+      requestAnimationFrame(renderBatch);
+      return;
+    }
+
+    if (term) {
+      currentMarks = Array.from(messagesEl.querySelectorAll("mark"));
+      if (currentSessionSearch.query === term) {
+        if (currentSessionSearch.loading) {
+          sessionSearchCount.textContent = "Searching...";
+        } else if (currentSessionSearch.error) {
+          sessionSearchCount.textContent = currentSessionSearch.error;
+        } else {
+          sessionSearchCount.textContent = `${currentSessionSearch.matchCount} matches in ${currentSessionSearch.messageMatchCount} messages`;
+        }
+      } else {
+        sessionSearchCount.textContent = "Searching...";
+      }
+    } else {
+      sessionSearchCount.textContent = "";
+    }
+
+    updateMatchNavState(term);
+  };
+
+  renderBatch();
 }
 
 function updateMatchNavState(term) {
@@ -1068,8 +1600,12 @@ function setActiveMarkIndex(index, { scroll }) {
 }
 
 function resetSessionPane() {
+  cancelPendingMessageRender();
+  sessionSearchFetchSeq += 1;
+  currentSessionSearch = createEmptySessionSearchState();
   currentSession = null;
   currentMessages = [];
+  expandedMessageIndexes = new Set();
   sessionSearchInput.value = "";
   sessionSearchCount.textContent = "";
   currentMarks = [];
@@ -1112,6 +1648,7 @@ function renderSessionHeader(session) {
   const resumeId = session.id || "-";
   resumeValueEl.textContent = resumeId;
   const resumeCommands = buildResumeCommands(currentSystem, currentSource, session.cwd, resumeId);
+  updateResumeCommandLabels();
   resumeCmdPsEl.textContent = resumeCommands.ps;
   resumeCmdWslEl.textContent = resumeCommands.wsl;
 
@@ -1146,7 +1683,9 @@ function setResultsHeader() {
 }
 
 function renderStatusMessage(text, { kind } = { kind: "muted" }) {
+  cancelPendingMessageRender();
   messagesEl.innerHTML = "";
+  sessionSearchCount.textContent = "";
   const div = document.createElement("div");
   div.className = kind === "error" ? "msg other error" : "muted";
   div.textContent = text;
@@ -1164,36 +1703,182 @@ function scheduleReloadList() {
   listReloadTimer = setTimeout(() => {
     listReloadTimer = null;
     reloadList();
-  }, 200);
+  }, LIST_RELOAD_DEBOUNCE_MS);
 }
 
-async function fetchSessions() {
-  const seq = (sessionsFetchSeq += 1);
+function scheduleSessionSearchRender() {
+  if (sessionSearchTimer) {
+    clearTimeout(sessionSearchTimer);
+  }
+  sessionSearchTimer = setTimeout(() => {
+    sessionSearchTimer = null;
+    refreshSessionSearch();
+  }, SESSION_SEARCH_DEBOUNCE_MS);
+}
+
+async function refreshSessionSearch() {
+  const term = sessionSearchInput.value.trim();
+  const fetchSeq = (sessionSearchFetchSeq += 1);
+
+  if (!term || !currentSession) {
+    currentSessionSearch = createEmptySessionSearchState();
+    renderMessages(currentMessages);
+    return;
+  }
+
+  currentSessionSearch = {
+    query: term,
+    matches: new Map(),
+    matchCount: 0,
+    messageMatchCount: 0,
+    loading: true,
+    error: "",
+  };
+  renderMessages(currentMessages);
+
+  try {
+    const res = await fetch(`${apiBase()}/session/${encodeURIComponent(currentSession.id)}/search?q=${encodeURIComponent(term)}`);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (fetchSeq !== sessionSearchFetchSeq) return;
+
+    const matches = new Map();
+    for (const match of data.matches || []) {
+      matches.set(match.message_index, match);
+    }
+
+    currentSessionSearch = {
+      query: term,
+      matches,
+      matchCount: Number.isFinite(data.match_count) ? data.match_count : 0,
+      messageMatchCount: Number.isFinite(data.message_match_count) ? data.message_match_count : matches.size,
+      loading: false,
+      error: "",
+    };
+    renderMessages(currentMessages);
+  } catch (err) {
+    if (fetchSeq !== sessionSearchFetchSeq) return;
+    currentSessionSearch = {
+      query: term,
+      matches: new Map(),
+      matchCount: 0,
+      messageMatchCount: 0,
+      loading: false,
+      error: `Search failed (${err?.message || err})`,
+    };
+    renderMessages(currentMessages);
+  }
+}
+
+async function fetchFullMessage(index) {
+  if (!currentSession || !Number.isInteger(index) || index < 0) {
+    throw new Error("Invalid message index");
+  }
+  const msg = currentMessages[index];
+  if (!msg) {
+    throw new Error("Message not found");
+  }
+  if (!msg.is_truncated || msg.full_text_loaded) {
+    return msg;
+  }
+
+  const res = await fetch(`${apiBase()}/session/${encodeURIComponent(currentSession.id)}/message/${index}`);
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
+
+  const data = await res.json();
+  const fullMessage = data.message;
+  if (!fullMessage || typeof fullMessage.text !== "string") {
+    throw new Error("Malformed response");
+  }
+
+  msg.preview_text = msg.preview_text || msg.text || "";
+  msg.text = fullMessage.text;
+  msg.char_count = Number.isFinite(fullMessage.char_count) ? fullMessage.char_count : fullMessage.text.length;
+  msg.is_truncated = false;
+  msg.full_text_loaded = true;
+  messageRenderCache.delete(msg);
+  return msg;
+}
+
+function buildListParams(limit, offset) {
   const q = (keywordInput.value || "").trim();
-  const start = normalizeDateInput(startInput.value);
-  const end = normalizeDateInput(endInput.value);
   const params = new URLSearchParams();
   if (q) params.set("q", q);
+  if (browseMode === "projects" && !currentProject) {
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    return params;
+  }
+
+  const start = normalizeDateInput(startInput.value);
+  const end = normalizeDateInput(endInput.value);
   if (start) params.set("start", start);
   if (end) params.set("end", end);
   if (currentProject) params.set("project", currentProject);
   if (currentSessionSort) params.set("sort", currentSessionSort);
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
+  return params;
+}
+
+function applyListPage(items, { append, hasMore, nextOffset }) {
+  currentListItems = append ? currentListItems.concat(items) : items;
+  currentListHasMore = !!hasMore;
+  currentListNextOffset = Number.isInteger(nextOffset) ? nextOffset : currentListItems.length;
+  currentListLoadingMore = false;
+  if (browseMode === "projects" && !currentProject) {
+    renderProjects(currentListItems);
+  } else {
+    renderSessions(currentListItems);
+  }
+  updateListFooter();
+}
+
+function resetListPagination() {
+  currentListItems = [];
+  currentListHasMore = false;
+  currentListNextOffset = 0;
+  currentListLoadingMore = false;
+  updateListFooter();
+}
+
+async function fetchSessions({ append = false } = {}) {
+  const seq = (sessionsFetchSeq += 1);
+  const limit = SESSION_LIST_PAGE_LIMIT;
+  const offset = append ? currentListNextOffset : 0;
+  const params = buildListParams(limit, offset);
+  currentListLoadingMore = append;
+  updateListFooter();
 
   try {
     const res = await fetch(`${apiBase()}/sessions?${params.toString()}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (seq !== sessionsFetchSeq) return;
-    renderSessions(data.sessions || []);
+    applyListPage(data.sessions || [], {
+      append,
+      hasMore: data.has_more,
+      nextOffset: data.next_offset,
+    });
   } catch (err) {
     if (seq !== sessionsFetchSeq) return;
-    renderSessions([]);
-    resultCountEl.textContent = "0";
+    currentListLoadingMore = false;
+    if (!append) {
+      currentListItems = [];
+      renderSessions([]);
+      resultCountEl.textContent = "0";
+    }
+    updateListFooter();
   }
 }
 
 async function fetchSession(sessionId) {
   const seq = (sessionFetchSeq += 1);
+  expandedMessageIndexes = new Set();
   renderStatusMessage("Loading…");
   try {
     const res = await fetch(`${apiBase()}/session/${encodeURIComponent(sessionId)}`);
@@ -1204,7 +1889,12 @@ async function fetchSession(sessionId) {
     const data = await res.json();
     if (seq !== sessionFetchSeq) return;
     currentSession = data.session;
-    currentMessages = data.messages || [];
+    currentMessages = (data.messages || []).map((msg) => ({
+      ...msg,
+      preview_text: msg?.is_truncated ? (msg.text || "") : null,
+      full_text_loaded: !msg?.is_truncated,
+    }));
+    expandedMessageIndexes = new Set();
     renderSessionHeader(currentSession);
     renderMessages(currentMessages);
   } catch (err) {
@@ -1213,30 +1903,50 @@ async function fetchSession(sessionId) {
   }
 }
 
-async function fetchProjects() {
+async function fetchProjects({ append = false } = {}) {
   const seq = (projectsFetchSeq += 1);
-  const q = (keywordInput.value || "").trim();
-  const params = new URLSearchParams();
-  if (q) params.set("q", q);
+  const limit = PROJECT_LIST_PAGE_LIMIT;
+  const offset = append ? currentListNextOffset : 0;
+  const params = buildListParams(limit, offset);
+  currentListLoadingMore = append;
+  updateListFooter();
   try {
     const res = await fetch(`${apiBase()}/projects?${params.toString()}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (seq !== projectsFetchSeq) return;
-    renderProjects(data.projects || []);
+    applyListPage(data.projects || [], {
+      append,
+      hasMore: data.has_more,
+      nextOffset: data.next_offset,
+    });
   } catch (err) {
     if (seq !== projectsFetchSeq) return;
-    renderProjects([]);
-    resultCountEl.textContent = "0";
+    currentListLoadingMore = false;
+    if (!append) {
+      currentListItems = [];
+      renderProjects([]);
+      resultCountEl.textContent = "0";
+    }
+    updateListFooter();
   }
 }
 
 async function reloadList() {
+  resetListPagination();
   setResultsHeader();
   if (browseMode === "projects" && !currentProject) {
-    return fetchProjects();
+    return fetchProjects({ append: false });
   }
-  return fetchSessions();
+  return fetchSessions({ append: false });
+}
+
+async function loadMoreList() {
+  if (!currentListHasMore || currentListLoadingMore) return;
+  if (browseMode === "projects" && !currentProject) {
+    return fetchProjects({ append: true });
+  }
+  return fetchSessions({ append: true });
 }
 
 async function deleteProjectSessions(project) {
@@ -1273,7 +1983,7 @@ async function deleteProjectSessions(project) {
 async function cleanupWeakSessions() {
   const scopeLabel = currentProject
     ? `project:\n${currentProject}`
-    : `${currentSystem === "wsl" ? "WSL" : "Windows"} ${getSourceLabel()} source`;
+    : `${getSystemLabel(currentSystem)} ${getSourceLabel()} source`;
   const confirmed = confirm(
     `Cleanup weak chats in ${scopeLabel}?\n\nRule:\n- fewer than 5 user prompts\n\nExamples that will be deleted:\n- "hello"\n- "Set-Location -LiteralPath ...; codex resume ..."\n\nSource JSONL files will be moved to deleted_projects for backup.`
   );
@@ -1370,7 +2080,7 @@ endInput.addEventListener("input", () => {
 });
 
 sessionSearchInput.addEventListener("input", () => {
-  renderMessages(currentMessages);
+  scheduleSessionSearchRender();
 });
 
 sessionSearchInput.addEventListener("keydown", (event) => {
@@ -1389,8 +2099,16 @@ nextMatchBtn.addEventListener("click", () => {
 
 clearSessionSearch.addEventListener("click", () => {
   sessionSearchInput.value = "";
+  sessionSearchFetchSeq += 1;
+  currentSessionSearch = createEmptySessionSearchState();
   renderMessages(currentMessages);
 });
+
+if (listLoadMoreBtn) {
+  listLoadMoreBtn.addEventListener("click", () => {
+    loadMoreList();
+  });
+}
 
 backToProjectsBtn.addEventListener("click", () => {
   currentProject = null;
@@ -1429,6 +2147,35 @@ copyResumeCmdWslBtn.addEventListener("click", () => {
   copyText(resumeCmdWslEl.textContent || "");
 });
 
+messagesEl.addEventListener("click", async (event) => {
+  const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+  const toggle = target ? target.closest("[data-message-toggle]") : null;
+  if (!toggle) return;
+  const index = Number(toggle.dataset.messageToggle);
+  if (!Number.isInteger(index)) return;
+  const willExpand = !expandedMessageIndexes.has(index);
+  const msg = currentMessages[index];
+
+  if (willExpand && msg?.is_truncated && !msg?.full_text_loaded) {
+    toggle.setAttribute("disabled", "true");
+    try {
+      await fetchFullMessage(index);
+    } catch (err) {
+      alert(`Failed to load full message (${err?.message || err}).`);
+      return;
+    } finally {
+      toggle.removeAttribute("disabled");
+    }
+  }
+
+  if (!willExpand) {
+    expandedMessageIndexes.delete(index);
+  } else {
+    expandedMessageIndexes.add(index);
+  }
+  renderMessages(currentMessages);
+});
+
 pinSessionBtn.addEventListener("click", async () => {
   if (!currentSession) return;
   const newPinned = !currentSession.pinned;
@@ -1448,11 +2195,20 @@ renameSessionBtn.addEventListener("click", async () => {
   const newTitle = prompt("New session name:", currentSession.title || "");
   if (newTitle === null || newTitle.trim() === "") return;
   const base = apiBase();
-  await fetch(`${base}/session/${encodeURIComponent(currentSession.id)}/rename`, {
+  const res = await fetch(`${base}/session/${encodeURIComponent(currentSession.id)}/rename`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ title: newTitle.trim() }),
   });
+  if (!res.ok) {
+    alert("Rename failed.");
+    return;
+  }
+  const payload = await res.json().catch(() => ({}));
+  if (!payload.ok) {
+    alert(payload.error || "Rename failed.");
+    return;
+  }
   currentSession.title = newTitle.trim();
   renderSessionHeader(currentSession);
   reloadList();
@@ -1483,7 +2239,6 @@ codeThemeButtons.forEach((btn) => {
 });
 applyStoredCodeTheme();
 applyStoredSessionSort();
-applyStoredSourceContext();
 
 if (sessionSortEl) {
   sessionSortEl.addEventListener("change", () => {
@@ -1501,9 +2256,10 @@ roleInputs.forEach((input) => {
   });
 });
 
-document.querySelectorAll("[data-source]").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    const source = btn.dataset.source;
+if (sourceTabsEl) {
+  sourceTabsEl.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target.closest("[data-source]") : null;
+    const source = target?.dataset?.source;
     if (!source || source === currentSource) return;
     setCurrentSource(source, { persist: true });
     currentProject = null;
@@ -1511,11 +2267,12 @@ document.querySelectorAll("[data-source]").forEach((btn) => {
     messagesEl.innerHTML = "";
     reloadList();
   });
-});
+}
 
-document.querySelectorAll("[data-system]").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    const system = btn.dataset.system;
+if (systemTabsEl) {
+  systemTabsEl.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target.closest("[data-system]") : null;
+    const system = target?.dataset?.system;
     if (!system || system === currentSystem) return;
     setCurrentSystem(system, { persist: true });
     currentProject = null;
@@ -1523,7 +2280,7 @@ document.querySelectorAll("[data-system]").forEach((btn) => {
     messagesEl.innerHTML = "";
     reloadList();
   });
-});
+}
 
 document.querySelectorAll("[data-view]").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -1658,5 +2415,11 @@ window.addEventListener("resize", () => {
   clampLayoutToViewport();
 });
 
-reloadList();
+async function bootstrapApp() {
+  await loadSourceCatalog();
+  applyStoredSourceContext();
+  updateResumeCommandLabels();
+  reloadList();
+}
 
+bootstrapApp();
