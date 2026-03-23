@@ -1,5 +1,5 @@
 param(
-    [string]$RepoDir = "E:\web\tools\Codex-Claude-History-Viewer",
+    [string]$RepoDir = "",
     [string]$CodexDir = "$env:USERPROFILE\.codex",
     [string]$ClaudeDir = "$env:USERPROFILE\.claude",
     [string]$OpenClawDir = "$env:USERPROFILE\.openclaw",
@@ -10,8 +10,28 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (-not (Test-Path -LiteralPath $RepoDir)) {
-    throw "RepoDir not found: $RepoDir"
+function Resolve-CchvRepoDir {
+    param([string]$Hint)
+
+    $candidates = @(
+        $Hint
+        $env:CCHV_REPO_DIR
+        "E:\web\tools\Codex-Claude-History-Viewer"
+        (Join-Path $env:USERPROFILE "web\tools\Codex-Claude-History-Viewer")
+    ) | Where-Object { $_ -and $_.Trim() }
+
+    foreach ($candidate in $candidates) {
+        $full = [System.IO.Path]::GetFullPath($candidate)
+        if (
+            (Test-Path -LiteralPath $full) -and
+            (Test-Path -LiteralPath (Join-Path $full "app.py")) -and
+            (Test-Path -LiteralPath (Join-Path $full "static"))
+        ) {
+            return $full
+        }
+    }
+
+    throw "CCHV repo not found. Set -RepoDir or CCHV_REPO_DIR."
 }
 
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
@@ -21,6 +41,8 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
 if (-not (Test-Path -LiteralPath $DataDir)) {
     New-Item -ItemType Directory -Path $DataDir | Out-Null
 }
+
+$RepoDir = Resolve-CchvRepoDir -Hint $RepoDir
 
 Set-Location -LiteralPath $RepoDir
 

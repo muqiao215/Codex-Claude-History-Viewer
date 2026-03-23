@@ -1,97 +1,95 @@
 ---
 name: codex-claude-history-viewer
-description: Use when users ask to browse or search local Codex, Claude Code, or OpenClaw session history, work around /resume project scope limits, run a local history UI on Windows or Ubuntu/Linux, or assess and extend CCHV for local CRUD-style session management.
+description: Use when users ask to browse or search local Codex, Claude Code, or OpenClaw session history, run the local history UI, recover context across projects, or launch the viewer on Windows, WSL, Ubuntu, or Linux.
 ---
 
 # Codex Claude History Viewer
 
-Use this skill for local session history workflows with:
+Use this skill for local session-history work with:
 
-- `The-Zombie0/Codex-Claude-History-Viewer`
 - Codex logs: `~/.codex/sessions`
-- Claude logs: `~/.claude/projects`
+- Claude Code logs: `~/.claude/projects`
 - OpenClaw logs: `~/.openclaw/agents`
 
-## 1) Confirm Current Capability First
+## What This Skill Is For
 
-Treat the upstream app as read-first:
+Use it when the user wants to:
 
-- Cross-project browse/search: supported
-- Session/project API (GET): supported
-- Built-in business CRUD on sessions: not supported by default
+- open the local history UI
+- search old Codex / Claude Code / OpenClaw sessions
+- recover context when `/resume` is workspace-scoped
+- inspect sessions by project
+- manage local history with the viewer's supported UI actions
+- run the viewer on Windows, WSL, Ubuntu, or Linux
 
-If user asks "does it support CRUD", answer clearly:
+If the user only wants raw history export or markdown compaction, prefer the more specialized history/export skills instead.
 
-- It maintains a local SQLite index internally.
-- That internal index maintenance is not user-facing CRUD on source session logs.
+## Runtime Rule
 
-For endpoint and code evidence, read:
-[references/api-and-crud-notes.md](references/api-and-crud-notes.md)
+Do not assume Windows.
 
-## 2) Run on Windows (Local-Only)
+Pick the launcher by runtime:
 
-From repo directory:
+- **Windows runtime** → use `scripts/start-cchv.ps1`
+- **Ubuntu / Linux runtime** → use `scripts/start-cchv.sh`
+- **WSL shell** → use `scripts/start-cchv.sh`
+
+The installed skill copy is not the app repo itself. The launchers must first locate the real local repo containing `app.py`.
+
+## Repo Resolution Rule
+
+Default to an existing local repo. Do not clone unless the user explicitly asks.
+
+Repo resolution priority:
+
+1. `CCHV_REPO_DIR` environment variable
+2. user-provided repo path
+3. common local paths for this machine:
+   - Windows: `E:\web\tools\Codex-Claude-History-Viewer`
+   - Linux / WSL: `/mnt/e/web/tools/Codex-Claude-History-Viewer`
+   - Linux: `~/web/tools/Codex-Claude-History-Viewer`
+
+If no valid repo is found, say that the viewer repo is missing locally and ask whether to install or clone it.
+
+## Launch Commands
+
+### Windows
 
 ```powershell
-python .\app.py `
-  --codex-dir C:\Users\11614\.codex `
-  --claude-dir C:\Users\11614\.claude `
-  --openclaw-dir C:\Users\11614\.openclaw `
-  --data-dir E:\cchv-data `
-  --host 127.0.0.1 `
-  --port 8787
+& "$env:USERPROFILE\.gemini\skills\codex-claude-history-viewer\scripts\start-cchv.ps1"
 ```
 
-Open `http://127.0.0.1:8787`.
-
-You can also use:
+Optional override:
 
 ```powershell
-.\scripts\start-cchv.ps1 -CodexDir C:\Users\11614\.codex -ClaudeDir C:\Users\11614\.claude -OpenClawDir C:\Users\11614\.openclaw -DataDir E:\cchv-data
+$env:CCHV_REPO_DIR='E:\web\tools\Codex-Claude-History-Viewer'
+& "$env:USERPROFILE\.gemini\skills\codex-claude-history-viewer\scripts\start-cchv.ps1"
 ```
 
-## 3) Run on Ubuntu / Linux
-
-From repo directory:
+### Ubuntu / Linux / WSL
 
 ```bash
-python3 ./app.py \
-  --codex-dir ~/.codex \
-  --claude-dir ~/.claude \
-  --openclaw-dir ~/.openclaw \
-  --data-dir ~/.cache/cchv \
-  --host 127.0.0.1 \
-  --port 8787
+bash ~/.gemini/skills/codex-claude-history-viewer/scripts/start-cchv.sh
 ```
 
-Or use the bundled launcher:
+Optional override:
 
 ```bash
-chmod +x ./scripts/start-cchv.sh
-./scripts/start-cchv.sh
+export CCHV_REPO_DIR=/mnt/e/web/tools/Codex-Claude-History-Viewer
+bash ~/.gemini/skills/codex-claude-history-viewer/scripts/start-cchv.sh
 ```
 
-Install an Ubuntu desktop entry:
+### Ubuntu Desktop Entry
 
 ```bash
-chmod +x ./scripts/install-linux-desktop-entry.sh
-./scripts/install-linux-desktop-entry.sh
+bash ~/.gemini/skills/codex-claude-history-viewer/scripts/install-linux-desktop-entry.sh
 ```
 
-## 4) Default Working Rules
+## Working Rules
 
-- Keep service bound to `127.0.0.1` unless user explicitly asks LAN access.
-- Do not mutate raw `.jsonl` session files unless user explicitly requests destructive changes.
-- Prefer "soft management" first (metadata/tag/archive layer), then optional hard delete.
+- Keep the server bound to `127.0.0.1` unless the user explicitly asks for LAN access
+- Do not mutate raw session JSONL files unless the user explicitly asks for destructive changes
+- Prefer built-in viewer actions and sidecar metadata over raw file surgery
+- When asked whether CRUD is supported, answer precisely: the viewer has local index/state management, not general arbitrary CRUD over source logs
 
-## 5) If User Wants CRUD
-
-Use a safe, incremental plan:
-
-1. Add metadata CRUD first (title, tags, archived, notes) in a sidecar SQLite table.
-2. Keep original logs immutable.
-3. Add explicit backup + confirmation flow before hard delete of source logs.
-4. Expose new endpoints (`POST/PUT/DELETE`) only for metadata unless user asks otherwise.
-
-Use the extension blueprint in:
-[references/api-and-crud-notes.md](references/api-and-crud-notes.md)
+Read `references/api-and-crud-notes.md` only when the user asks about API shape, CRUD behavior, or extension design.
