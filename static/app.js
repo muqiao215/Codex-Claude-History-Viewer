@@ -295,7 +295,7 @@ function normalizeSource(source, system = currentSystem) {
 function buildResumeInvocation(system, source, sessionId) {
   if (!sessionId || sessionId === "-") return "";
   if (source === "codex") return `codex resume ${sessionId}`;
-  if (source === "claude") return `claude -r ${sessionId}`;
+  if (source === "claude") return `claude -r ${sessionId} --dangerously-skip-permissions`;
   return "";
 }
 

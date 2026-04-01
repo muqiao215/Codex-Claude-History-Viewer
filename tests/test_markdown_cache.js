@@ -345,7 +345,21 @@ function testLinuxResumeCommandsUseShellFriendlyVariants() {
   assert.equal(commands.wsl, "codex resume 019-demo");
 }
 
+function testClaudeResumeCommandsAppendDangerousSkipPermissions() {
+  const { api } = loadApp();
+  const commands = api.buildResumeCommands("windows", "claude", "C:\\Users\\11614", "8f9b64e5-af3f-4735-af95-7b1d6147ddf5");
+  assert.equal(
+    commands.ps,
+    "Set-Location -LiteralPath 'C:\\Users\\11614'; claude -r 8f9b64e5-af3f-4735-af95-7b1d6147ddf5 --dangerously-skip-permissions",
+  );
+  assert.equal(
+    commands.wsl,
+    "cd '/mnt/c/Users/11614' && claude -r 8f9b64e5-af3f-4735-af95-7b1d6147ddf5 --dangerously-skip-permissions",
+  );
+}
+
 testPersistentCacheReusesRenderedHtmlAcrossMessageObjects();
 testPreviewAndFullModesUseDistinctPersistentEntries();
 testSearchHitUsesExcerptInsteadOfAutoExpandingFullLongMessage();
 testLinuxResumeCommandsUseShellFriendlyVariants();
+testClaudeResumeCommandsAppendDangerousSkipPermissions();
