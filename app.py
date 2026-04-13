@@ -1677,6 +1677,359 @@ class Indexer:
             return cur.rowcount > 0
 
 
+class HermesStateIndexer:
+    def __init__(self, db_path: Path):
+        self.source = "hermes"
+        self.db_path = Path(db_path).expanduser()
+        self.conn = sqlite3.connect(
+            f"file:{self.db_path}?mode=ro",
+            uri=True,
+            check_same_thread=False,
+        )
+        self.conn.row_factory = sqlite3.Row
+        self.lock = threading.Lock()
+
+    def maybe_update_index(self, max_age_seconds=None):
+        return
+
+    def scan_sessions(self):
+        return
+
+    def _project_value(self):
+        return "COALESCE(NULLIF(s.source, ''), '(unknown source)')"
+
+    def _project_value_no_alias(self):
+        return "COALESCE(NULLIF(source, ''), '(unknown source)')"
+
+    def _session_title(self, row):
+        title = str(row["title"] or "").strip()
+        if title:
+            return title
+        model = str(row["model"] or "").strip() or "Hermes"
+        source = str(row["source"] or "").strip() or "session"
+        return f"{model} - {source} - {str(row['id'])[:8]}"
+
+    def _serialize_session_row(self, row):
+        return {
+            "id": row["id"],
+            "start_ts_ms": parse_ts(row["started_at"]),
+            "end_ts_ms": parse_ts(row["ended_at"]),
+            "title": self._session_title(row),
+            "message_count": int(row["message_count"] or 0),
+            "cwd": str(row["source"] or "").strip() or "(unknown source)",
+            "pinned": 0,
+        }
+
+    def _tool_use_text(self, row):
+        raw = str(row["tool_calls"] or "").strip()
+        tool_name_fallback = str(row["tool_name"] or "").strip() or "tool"
+        reasoning = str(row["reasoning"] or "").strip()
+        blocks = []
+        calls = None
+        if raw:
+            try:
+                calls = json.loads(raw)
+            except json.JSONDecodeError:
+                calls = None
+        if not isinstance(calls, list):
+            calls = [calls] if calls else []
+
+        for idx, call in enumerate(calls):
+            function = call.get("function") if isinstance(call, dict) else None
+            name = ""
+            arguments = None
+            if isinstance(function, dict):
+                name = str(function.get("name") or "").strip()
+                arguments = function.get("arguments")
+            if not name and isinstance(call, dict):
+                name = str(call.get("name") or call.get("type") or "").strip()
+            name = name or tool_name_fallback
+            lines = [f"Tool use: {name}"]
+            if idx == 0 and reasoning:
+                lines.append(f"Description: {reasoning}")
+            if arguments not in (None, ""):
+                lines.append("Input:")
+                if isinstance(arguments, str):
+                    formatted = arguments
+                    try:
+                        parsed = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        parsed = None
+                    if parsed is not None:
+                        formatted = json.dumps(parsed, ensure_ascii=False, indent=2)
+                        lines.append("```json")
+                        lines.append(formatted)
+                        lines.append("```")
+                    else:
+                        lines.append(arguments)
+                else:
+                    lines.append("```json")
+                    lines.append(json.dumps(arguments, ensure_ascii=False, indent=2))
+                    lines.append("```")
+            blocks.append("\n".join(lines).strip())
+
+        if blocks:
+            return "\n\n".join(blocks)
+        if reasoning:
+            return f"Tool use: {tool_name_fallback}\nDescription: {reasoning}"
+        return f"Tool use: {tool_name_fallback}"
+
+    def _serialize_message_row(self, row, message_index, include_full_text=False):
+        role = str(row["role"] or "").strip() or "assistant"
+        content = str(row["content"] or "")
+        reasoning = str(row["reasoning"] or "")
+        tool_calls = str(row["tool_calls"] or "").strip()
+
+        if role == "tool":
+            mapped_role = "tool"
+            kind = "tool_result"
+            text = content
+        elif tool_calls:
+            mapped_role = "assistant"
+            kind = "tool_use"
+            text = self._tool_use_text(row)
+        elif content:
+            mapped_role = role
+            kind = "message"
+            text = content
+        elif reasoning:
+            mapped_role = role
+            kind = "reasoning_summary"
+            text = reasoning
+        else:
+            mapped_role = role
+            kind = "message"
+            text = ""
+
+        is_truncated = (not include_full_text) and len(text) > MESSAGE_INLINE_FULL_THRESHOLD
+        return {
+            "message_index": int(message_index),
+            "ts_ms": parse_ts(row["timestamp"]),
+            "role": mapped_role,
+            "kind": kind,
+            "text": text if not is_truncated else build_message_preview_text(text),
+            "char_count": len(text),
+            "is_truncated": bool(is_truncated),
+        }
+
+    def _session_lookup(self, session_id):
+        return self.conn.execute(
+            """
+            SELECT id, source, user_id, model, started_at, ended_at, message_count, title
+            FROM sessions
+            WHERE id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+
+    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None):
+        clean_limit, clean_offset = normalize_page_args(limit, offset)
+        terms = [t for t in str(q or "").split() if t]
+
+        sql = (
+            "SELECT s.id, s.source, s.user_id, s.model, s.started_at, s.ended_at, s.message_count, s.title "
+            "FROM sessions s WHERE 1=1"
+        )
+        args = []
+        if start_ms is not None:
+            sql += " AND s.started_at >= ?"
+            args.append(int(start_ms) / 1000)
+        if end_ms is not None:
+            sql += " AND s.started_at <= ?"
+            args.append(int(end_ms) / 1000)
+        if cwd:
+            sql += f" AND {self._project_value()} = ?"
+            args.append(str(cwd))
+        for term in terms:
+            like = f"%{term}%"
+            sql += (
+                " AND ("
+                "COALESCE(s.title, '') LIKE ? OR COALESCE(s.source, '') LIKE ? OR COALESCE(s.user_id, '') LIKE ? "
+                "OR COALESCE(s.model, '') LIKE ? OR s.id LIKE ? "
+                "OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND COALESCE(m.content, '') LIKE ?) "
+                "OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id AND COALESCE(m.reasoning, '') LIKE ?)"
+                ")"
+            )
+            args.extend([like, like, like, like, like, like, like])
+
+        sort_key = str(sort or "start").strip().lower()
+        if sort_key in ("last", "end", "updated", "update"):
+            sql += " ORDER BY COALESCE(s.ended_at, s.started_at) DESC, s.started_at DESC"
+        else:
+            sql += " ORDER BY s.started_at DESC, COALESCE(s.ended_at, s.started_at) DESC"
+        sql += " LIMIT ? OFFSET ?"
+        args.extend([clean_limit + 1, clean_offset])
+
+        with self.lock:
+            rows = self.conn.execute(sql, args).fetchall()
+
+        items = [self._serialize_session_row(row) for row in rows[:clean_limit]]
+        has_more = len(rows) > clean_limit
+        next_offset = clean_offset + len(items) if has_more else None
+        return {
+            "items": items,
+            "limit": clean_limit,
+            "offset": clean_offset,
+            "has_more": has_more,
+            "next_offset": next_offset,
+        }
+
+    def list_projects_page(self, q=None, limit=DEFAULT_PAGE_LIMIT, offset=0):
+        clean_limit, clean_offset = normalize_page_args(limit, offset)
+        project_expr = self._project_value_no_alias()
+        sql = (
+            f"SELECT {project_expr} AS project, COUNT(*) AS session_count, MAX(started_at) AS last_started_at "
+            "FROM sessions WHERE 1=1"
+        )
+        args = []
+        if q:
+            sql += f" AND {project_expr} LIKE ?"
+            args.append(f"%{q}%")
+        sql += " GROUP BY project ORDER BY last_started_at DESC LIMIT ? OFFSET ?"
+        args.extend([clean_limit + 1, clean_offset])
+
+        with self.lock:
+            rows = self.conn.execute(sql, args).fetchall()
+
+        items = [
+            {
+                "project": row["project"],
+                "session_count": int(row["session_count"] or 0),
+                "last_ts_ms": parse_ts(row["last_started_at"]),
+            }
+            for row in rows[:clean_limit]
+        ]
+        has_more = len(rows) > clean_limit
+        next_offset = clean_offset + len(items) if has_more else None
+        return {
+            "items": items,
+            "limit": clean_limit,
+            "offset": clean_offset,
+            "has_more": has_more,
+            "next_offset": next_offset,
+        }
+
+    def get_session(self, session_id):
+        with self.lock:
+            session = self._session_lookup(session_id)
+            if not session:
+                return None
+            messages = self.conn.execute(
+                """
+                SELECT id, timestamp, role, content, tool_calls, tool_name, reasoning
+                FROM messages
+                WHERE session_id = ?
+                ORDER BY timestamp ASC, id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+        return {
+            "session": self._serialize_session_row(session),
+            "messages": [
+                self._serialize_message_row(row, idx)
+                for idx, row in enumerate(messages)
+            ],
+        }
+
+    def get_session_message(self, session_id, message_index):
+        try:
+            offset = int(message_index)
+        except (TypeError, ValueError):
+            return None
+        if offset < 0:
+            return None
+
+        with self.lock:
+            session = self._session_lookup(session_id)
+            if not session:
+                return None
+            row = self.conn.execute(
+                """
+                SELECT id, timestamp, role, content, tool_calls, tool_name, reasoning
+                FROM messages
+                WHERE session_id = ?
+                ORDER BY timestamp ASC, id ASC
+                LIMIT 1 OFFSET ?
+                """,
+                (session_id, offset),
+            ).fetchone()
+        if not row:
+            return None
+        return self._serialize_message_row(row, offset, include_full_text=True)
+
+    def search_session_messages(self, session_id, query):
+        term = str(query or "").strip()
+        result = {
+            "query": term,
+            "match_count": 0,
+            "message_match_count": 0,
+            "matches": [],
+        }
+        if not term:
+            return result
+
+        pattern = re.compile(re.escape(term), re.IGNORECASE)
+
+        with self.lock:
+            session = self._session_lookup(session_id)
+            if not session:
+                return None
+            rows = self.conn.execute(
+                """
+                SELECT id, timestamp, role, content, tool_calls, tool_name, reasoning
+                FROM messages
+                WHERE session_id = ?
+                ORDER BY timestamp ASC, id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+
+        matches = []
+        total_hits = 0
+        for idx, row in enumerate(rows):
+            serialized = self._serialize_message_row(row, idx, include_full_text=True)
+            text = str(serialized["text"] or "")
+            found = list(pattern.finditer(text))
+            if not found:
+                continue
+            total_hits += len(found)
+            excerpt = build_search_excerpt_text(text, found[0].start(), found[0].end())
+            matches.append({
+                "message_index": idx,
+                "ts_ms": serialized["ts_ms"],
+                "role": serialized["role"],
+                "kind": serialized["kind"],
+                "hit_count": len(found),
+                "char_count": serialized["char_count"],
+                "is_truncated": serialized["char_count"] > MESSAGE_INLINE_FULL_THRESHOLD,
+                "excerpt_text": excerpt["text"],
+                "excerpt_start": excerpt["start"],
+                "excerpt_end": excerpt["end"],
+                "excerpt_has_more_before": excerpt["has_more_before"],
+                "excerpt_has_more_after": excerpt["has_more_after"],
+            })
+
+        result["match_count"] = total_hits
+        result["message_match_count"] = len(matches)
+        result["matches"] = matches
+        return result
+
+    def rename_session(self, session_id, title):
+        return False
+
+    def archive_session(self, session_id, archived_dir):
+        return False, "unsupported"
+
+    def delete_project_sessions(self, project, deleted_dir):
+        return False, "unsupported", 0, None
+
+    def cleanup_weak_sessions(self, deleted_dir, min_user_messages=5, project=None):
+        return False, "unsupported", 0, None
+
+    def pin_session(self, session_id, pinned):
+        return False
+
+
 class WslBootstrapper:
     def __init__(self, distro):
         self.distro = str(distro or "").strip()
@@ -1724,6 +2077,8 @@ class SourceBackend:
         recall_db_path,
         file_filter_fn=None,
         ensure_fn=None,
+        indexer_factory=None,
+        read_only=False,
     ):
         self.system = system
         self.source = source
@@ -1732,17 +2087,21 @@ class SourceBackend:
         self.archived_dir = Path(archived_dir)
         self.deleted_dir = Path(deleted_dir)
         self.ensure_fn = ensure_fn
-        self.indexer = Indexer(
-            sessions_dir=self.sessions_dir,
-            data_dir=Path(data_dir),
-            source=source,
-            db_filename=db_filename,
-            scan_interval=scan_interval,
-            parse_file_fn=parse_file_fn,
-            file_filter_fn=file_filter_fn,
-            parser_version=parser_version,
-            recall_db_path=recall_db_path,
-        )
+        self.read_only = bool(read_only)
+        if indexer_factory is not None:
+            self.indexer = indexer_factory()
+        else:
+            self.indexer = Indexer(
+                sessions_dir=self.sessions_dir,
+                data_dir=Path(data_dir),
+                source=source,
+                db_filename=db_filename,
+                scan_interval=scan_interval,
+                parse_file_fn=parse_file_fn,
+                file_filter_fn=file_filter_fn,
+                parser_version=parser_version,
+                recall_db_path=recall_db_path,
+            )
         if self.ensure_fn is None:
             self.indexer.maybe_update_index(max_age_seconds=0)
 
@@ -1858,6 +2217,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "not found"}, status=404)
         if not self._ensure_backend_ready(backend):
             return
+        if getattr(backend, "read_only", False):
+            return self.send_json({"error": "read_only_source"}, status=405)
 
         def _rename():
             title = data.get("title", "").strip()
@@ -1935,6 +2296,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "sessions_dir": str(backend.sessions_dir),
                 "archived_dir": str(backend.archived_dir),
                 "deleted_dir": str(backend.deleted_dir),
+                "read_only": bool(getattr(backend, "read_only", False)),
             })
         return self.send_json({
             "sources": items,
@@ -2029,6 +2391,7 @@ def main():
     parser.add_argument("--codex-dir", default=os.path.expanduser("~/.codex"))
     parser.add_argument("--claude-dir", default=os.path.expanduser("~/.claude"))
     parser.add_argument("--openclaw-dir", default=os.path.expanduser("~/.openclaw"))
+    parser.add_argument("--hermes-state-db", default=None)
     parser.add_argument("--wsl-distro", default="Ubuntu-22.04")
     parser.add_argument("--wsl-user", default="muqiao")
     parser.add_argument("--wsl-codex-dir", default=None)
@@ -2048,6 +2411,22 @@ def main():
     runtime_system = detect_runtime_system()
     source_backends = {}
 
+    def detect_hermes_state_db(explicit_path):
+        candidates = []
+        if explicit_path:
+            candidates.append(Path(explicit_path).expanduser())
+        if runtime_system != "windows":
+            candidates.extend(
+                [
+                    Path(__file__).resolve().parent.parent / "hermes-agent" / ".hermes-home" / "state.db",
+                    Path("~/.hermes/state.db").expanduser(),
+                ]
+            )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
     def register_source(
         system,
         source,
@@ -2059,6 +2438,8 @@ def main():
         *,
         file_filter_fn=None,
         ensure_fn=None,
+        indexer_factory=None,
+        read_only=False,
     ):
         recall_db_path = None
         if system in ("windows", "linux") and source in ("codex", "claude"):
@@ -2078,6 +2459,8 @@ def main():
             recall_db_path=recall_db_path,
             file_filter_fn=file_filter_fn,
             ensure_fn=ensure_fn,
+            indexer_factory=indexer_factory,
+            read_only=read_only,
         )
 
     openclaw_filter = lambda p: p.parent.name == "sessions"
@@ -2099,6 +2482,21 @@ def main():
         register_source("linux", "codex", codex_dir, codex_dir / "sessions", "index_linux.sqlite", parse_codex_session_file, 4)
         register_source("linux", "claude", claude_dir, claude_dir / "projects", "index_linux_claude.sqlite", parse_claude_session_file, 3, file_filter_fn=claude_filter)
         register_source("linux", "openclaw", openclaw_dir, openclaw_dir / "agents", "index_linux_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter)
+
+    hermes_state_db = detect_hermes_state_db(args.hermes_state_db)
+    if hermes_state_db:
+        hermes_root = hermes_state_db.parent
+        register_source(
+            runtime_system,
+            "hermes",
+            hermes_root,
+            hermes_root,
+            "index_hermes.sqlite",
+            parse_codex_session_file,
+            1,
+            indexer_factory=lambda: HermesStateIndexer(hermes_state_db),
+            read_only=True,
+        )
 
     static_dir = Path(__file__).resolve().parent / "static"
 

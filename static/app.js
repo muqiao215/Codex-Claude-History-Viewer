@@ -71,13 +71,14 @@ let currentListLoadingMore = false;
 let runtimeSystem = "windows";
 let currentWslDistro = "Ubuntu-22.04";
 let availableSystems = ["windows", "wsl", "linux"];
+let sourceMeta = new Map();
 let availableSourcesBySystem = new Map([
   ["windows", ["codex", "claude", "openclaw"]],
   ["wsl", ["codex", "claude", "openclaw"]],
   ["linux", ["codex", "claude", "openclaw"]],
 ]);
 const SYSTEM_ORDER = ["windows", "wsl", "linux"];
-const SOURCE_ORDER = ["codex", "claude", "openclaw"];
+const SOURCE_ORDER = ["codex", "claude", "openclaw", "hermes"];
 const LIST_RELOAD_DEBOUNCE_MS = 200;
 const SESSION_SEARCH_DEBOUNCE_MS = 220;
 const MESSAGE_RENDER_BATCH_SIZE = 20;
@@ -146,6 +147,18 @@ function getAvailableSystems() {
 function getAvailableSources(system = currentSystem) {
   const items = availableSourcesBySystem.get(system);
   return Array.isArray(items) && items.length > 0 ? items : ["codex"];
+}
+
+function sourceMetaKey(system = currentSystem, source = currentSource) {
+  return `${system}:${source}`;
+}
+
+function getSourceMeta(system = currentSystem, source = currentSource) {
+  return sourceMeta.get(sourceMetaKey(system, source)) || {};
+}
+
+function sourceIsReadOnly(system = currentSystem, source = currentSource) {
+  return !!getSourceMeta(system, source).read_only;
 }
 
 function formatTime(ms) {
@@ -227,6 +240,7 @@ function toWslPath(value) {
 function getSourceLabel(source = currentSource) {
   if (source === "claude") return "Claude Code";
   if (source === "openclaw") return "OpenClaw";
+  if (source === "hermes") return "Hermes";
   return "Codex";
 }
 
@@ -654,9 +668,18 @@ async function loadSourceCatalog() {
     if (availableSystems.length === 0) {
       availableSystems = [runtimeSystem];
     }
+    sourceMeta = new Map();
     availableSourcesBySystem = new Map();
     nextSourcesBySystem.forEach((sources, system) => {
       availableSourcesBySystem.set(system, sortByKnownOrder(sources, SOURCE_ORDER));
+    });
+    (data.sources || []).forEach((item) => {
+      const system = String(item?.system || "").trim();
+      const source = String(item?.source || "").trim();
+      if (!system || !source) return;
+      sourceMeta.set(sourceMetaKey(system, source), {
+        read_only: !!item?.read_only,
+      });
     });
   } catch {
     runtimeSystem = normalizeSystem(runtimeSystem);
@@ -1652,7 +1675,7 @@ function renderSessionHeader(session) {
   resumeCmdPsEl.textContent = resumeCommands.ps;
   resumeCmdWslEl.textContent = resumeCommands.wsl;
 
-  if (sessionActionsEl) sessionActionsEl.style.display = "flex";
+  if (sessionActionsEl) sessionActionsEl.style.display = sourceIsReadOnly() ? "none" : "flex";
   if (pinSessionBtn) {
     pinSessionBtn.textContent = session.pinned ? "📌 Unpin" : "📌 Pin";
   }
@@ -1661,12 +1684,16 @@ function renderSessionHeader(session) {
 function setResultsHeader() {
   const showingSessions = !(browseMode === "projects" && !currentProject);
   const showingProjectActions = browseMode === "projects" && !!currentProject;
+  const allowMutations = !sourceIsReadOnly();
   if (sessionSortWrapEl) {
     sessionSortWrapEl.style.display = showingSessions ? "flex" : "none";
   }
   backToProjectsBtn.style.display = showingProjectActions ? "inline-block" : "none";
   if (deleteProjectSessionsBtn) {
-    deleteProjectSessionsBtn.style.display = showingProjectActions ? "inline-block" : "none";
+    deleteProjectSessionsBtn.style.display = showingProjectActions && allowMutations ? "inline-block" : "none";
+  }
+  if (cleanupWeakSessionsBtn) {
+    cleanupWeakSessionsBtn.style.display = allowMutations ? "inline-block" : "none";
   }
 
   if (browseMode === "projects" && !currentProject) {

@@ -1,6 +1,6 @@
 # Codex & Claude History Viewer
 
-Local-first, dependency-free web viewer for **Codex CLI**, **Claude Code**, and **OpenClaw** session logs.
+Local-first, dependency-free web viewer for **Codex CLI**, **Claude Code**, **OpenClaw**, and **Hermes** session history.
 
 - Browse sessions and projects (work dirs)
 - Search sessions by keyword + date range
@@ -50,6 +50,7 @@ By default it reads:
 - Codex logs: `~/.codex/sessions`
 - Claude logs: `~/.claude/projects`
 - OpenClaw logs: `~/.openclaw/agents`
+- Hermes state DB: auto-detected from `~/.hermes/state.db` or `../hermes-agent/.hermes-home/state.db`
 
 Indexes (SQLite) are stored next to `app.py` (the repo folder) unless you set `--data-dir`.
 
@@ -91,6 +92,9 @@ python3 app.py --host 0.0.0.0 --port 8787
 # Custom log locations (these are the *base dirs* that contain `sessions/` and `projects/`)
 python3 app.py --codex-dir ~/.codex --claude-dir ~/.claude --openclaw-dir ~/.openclaw
 
+# Explicit Hermes DB path (optional; otherwise auto-detected on Linux)
+python3 app.py --hermes-state-db ~/.hermes/state.db
+
 # Faster/slower auto-rescan (seconds)
 python3 app.py --scan-interval 2
 ```
@@ -130,10 +134,10 @@ That writes:
 ## Using the UI
 
 - **System**: switch between the runtime systems that are actually available.
-- **Source**: switch between Codex / Claude Code / OpenClaw logs.
+- **Source**: switch between Codex / Claude Code / OpenClaw / Hermes history.
 - **Browse**:
   - **Sessions**: list individual sessions.
-  - **Projects**: group sessions by working directory (cwd).
+  - **Projects**: group sessions by working directory (cwd), or by Hermes source for Hermes sessions.
 - **Sidebar sort**: top-right dropdown in the sessions list:
   - `Start time` (default)
   - `Last activity`

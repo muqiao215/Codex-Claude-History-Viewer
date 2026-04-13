@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+import sqlite3
 
 
 REPO_DIR = Path(__file__).resolve().parents[1]
@@ -201,6 +202,141 @@ class ListPaginationTests(unittest.TestCase):
         self.assertEqual(page["items"][0]["project"], "project-0")
         self.assertTrue(page["has_more"])
         self.assertEqual(page["next_offset"], 1)
+
+
+class HermesStateIndexerTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        self.db_path = root / "state.db"
+        self._seed_db()
+        self.indexer = app.HermesStateIndexer(self.db_path)
+        self.addCleanup(self.temp_dir.cleanup)
+        self.addCleanup(self.indexer.conn.close)
+
+    def _seed_db(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            """
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT,
+                user_id TEXT,
+                model TEXT,
+                model_config TEXT,
+                system_prompt TEXT,
+                parent_session_id TEXT,
+                started_at REAL,
+                ended_at REAL,
+                end_reason TEXT,
+                message_count INTEGER,
+                tool_call_count INTEGER,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                cache_read_tokens INTEGER,
+                cache_write_tokens INTEGER,
+                reasoning_tokens INTEGER,
+                billing_provider TEXT,
+                billing_base_url TEXT,
+                billing_mode TEXT,
+                estimated_cost_usd REAL,
+                actual_cost_usd REAL,
+                cost_status TEXT,
+                cost_source TEXT,
+                pricing_version TEXT,
+                title TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                role TEXT,
+                content TEXT,
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                timestamp REAL,
+                token_count INTEGER,
+                finish_reason TEXT,
+                reasoning TEXT,
+                reasoning_details TEXT,
+                codex_reasoning_items TEXT
+            )
+            """
+        )
+        conn.execute("CREATE VIRTUAL TABLE messages_fts USING fts5(content)")
+        conn.execute(
+            """
+            INSERT INTO sessions (
+                id, source, user_id, model, started_at, ended_at, message_count, title
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("sess-1", "telegram", None, "glm-5.1", 10.0, 20.0, 4, None),
+        )
+        conn.executemany(
+            """
+            INSERT INTO messages (
+                session_id, role, content, tool_calls, tool_name, timestamp, reasoning
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("sess-1", "user", "Needle request", None, None, 10.0, None),
+                (
+                    "sess-1",
+                    "assistant",
+                    "",
+                    '[{"function":{"name":"terminal","arguments":"{\\"command\\":\\"echo hi\\"}"}}]',
+                    None,
+                    11.0,
+                    "Run a terminal command",
+                ),
+                ("sess-1", "tool", '{"output":"needle output"}', None, None, 12.0, None),
+                ("sess-1", "assistant", "", None, None, 13.0, "Reasoning only"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO messages_fts (content) VALUES (?)",
+            [("Needle request",), ('{"output":"needle output"}',)],
+        )
+        conn.commit()
+        conn.close()
+
+    def test_list_sessions_page_maps_hermes_sessions(self):
+        page = self.indexer.list_sessions_page(limit=10, offset=0, sort="start")
+
+        self.assertEqual(len(page["items"]), 1)
+        session = page["items"][0]
+        self.assertEqual(session["id"], "sess-1")
+        self.assertEqual(session["cwd"], "telegram")
+        self.assertEqual(session["start_ts_ms"], 10000)
+        self.assertEqual(session["end_ts_ms"], 20000)
+        self.assertEqual(session["pinned"], 0)
+        self.assertIn("glm-5.1", session["title"])
+
+    def test_get_session_maps_tool_rows_and_reasoning_rows(self):
+        data = self.indexer.get_session("sess-1")
+
+        self.assertIsNotNone(data)
+        self.assertEqual(len(data["messages"]), 4)
+        self.assertEqual(data["messages"][1]["kind"], "tool_use")
+        self.assertIn("Tool use: terminal", data["messages"][1]["text"])
+        self.assertIn("Description: Run a terminal command", data["messages"][1]["text"])
+        self.assertEqual(data["messages"][2]["role"], "tool")
+        self.assertEqual(data["messages"][2]["kind"], "tool_result")
+        self.assertEqual(data["messages"][3]["kind"], "reasoning_summary")
+        self.assertEqual(data["messages"][3]["text"], "Reasoning only")
+
+    def test_search_session_messages_matches_hermes_content(self):
+        data = self.indexer.search_session_messages("sess-1", "needle")
+
+        self.assertIsNotNone(data)
+        self.assertEqual(data["query"], "needle")
+        self.assertEqual(data["message_match_count"], 2)
+        self.assertEqual(data["match_count"], 2)
+        self.assertEqual([item["message_index"] for item in data["matches"]], [0, 2])
 
 
 if __name__ == "__main__":
