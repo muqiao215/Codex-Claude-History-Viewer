@@ -10,30 +10,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Resolve-CchvRepoDir {
-    param([string]$Hint)
-
-    $candidates = @(
-        $Hint
-        $env:CCHV_REPO_DIR
-        "E:\web\tools\Codex-Claude-History-Viewer"
-        (Join-Path $env:USERPROFILE "web\tools\Codex-Claude-History-Viewer")
-    ) | Where-Object { $_ -and $_.Trim() }
-
-    foreach ($candidate in $candidates) {
-        $full = [System.IO.Path]::GetFullPath($candidate)
-        if (
-            (Test-Path -LiteralPath $full) -and
-            (Test-Path -LiteralPath (Join-Path $full "app.py")) -and
-            (Test-Path -LiteralPath (Join-Path $full "static"))
-        ) {
-            return $full
-        }
-    }
-
-    throw "CCHV repo not found. Set -RepoDir or CCHV_REPO_DIR."
-}
-
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     throw "python not found in PATH"
 }
@@ -42,7 +18,12 @@ if (-not (Test-Path -LiteralPath $DataDir)) {
     New-Item -ItemType Directory -Path $DataDir | Out-Null
 }
 
-$RepoDir = Resolve-CchvRepoDir -Hint $RepoDir
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Resolver = Join-Path $ScriptDir "resolve_cchv_repo.py"
+$RepoDir = (& python $Resolver --hint $RepoDir --script-dir $ScriptDir --cwd (Get-Location).Path).Trim()
+if (-not $RepoDir) {
+    throw "CCHV repo not found. Set -RepoDir or CCHV_REPO_DIR."
+}
 
 Set-Location -LiteralPath $RepoDir
 

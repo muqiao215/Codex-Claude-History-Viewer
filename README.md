@@ -120,6 +120,13 @@ chmod +x ./scripts/start-cchv.sh
 ./scripts/start-cchv.sh
 ```
 
+The launcher now probes the repo path automatically in this order:
+
+- explicit `REPO_DIR` / `CCHV_REPO_DIR`
+- repo-local launch from `scripts/`
+- nearby workspace paths such as `./repos/Codex-Claude-History-Viewer`
+- user-level fallbacks such as `~/.ductor/workspace/repos/Codex-Claude-History-Viewer`
+
 Install a desktop entry on Ubuntu:
 
 ```bash

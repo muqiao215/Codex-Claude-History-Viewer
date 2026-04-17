@@ -10,13 +10,14 @@ Use this skill for local session-history work with:
 - Codex logs: `~/.codex/sessions`
 - Claude Code logs: `~/.claude/projects`
 - OpenClaw logs: `~/.openclaw/agents`
+- Hermes state DB: `~/.hermes/state.db` or `../hermes-agent/.hermes-home/state.db`
 
 ## What This Skill Is For
 
 Use it when the user wants to:
 
 - open the local history UI
-- search old Codex / Claude Code / OpenClaw sessions
+- search old Codex / Claude Code / OpenClaw / Hermes sessions
 - recover context when `/resume` is workspace-scoped
 - inspect sessions by project
 - manage local history with the viewer's supported UI actions
@@ -39,13 +40,19 @@ The installed skill copy is not the app repo itself. The launchers must first lo
 ## Repo Resolution Rule
 
 Default to an existing local repo. Do not clone unless the user explicitly asks.
+Prefer the resolver probe before falling back to machine-specific absolute paths.
 
 Repo resolution priority:
 
 1. `CCHV_REPO_DIR` environment variable
 2. user-provided repo path
-3. common local paths for this machine:
+3. resolver probe based on launcher location and current working directory:
+   - repo-local launch from `.../Codex-Claude-History-Viewer/scripts`
+   - sibling probe like `../repos/Codex-Claude-History-Viewer`
+   - workspace probe like `<workspace>/repos/Codex-Claude-History-Viewer`
+4. common fallback paths:
    - Windows: `E:\web\tools\Codex-Claude-History-Viewer`
+   - Linux: `~/.ductor/workspace/repos/Codex-Claude-History-Viewer`
    - Linux / WSL: `/mnt/e/web/tools/Codex-Claude-History-Viewer`
    - Linux: `~/web/tools/Codex-Claude-History-Viewer`
 
@@ -75,6 +82,13 @@ bash ~/.gemini/skills/codex-claude-history-viewer/scripts/start-cchv.sh
 Optional override:
 
 ```bash
+export CCHV_REPO_DIR=/root/.ductor/workspace/repos/Codex-Claude-History-Viewer
+bash ~/.gemini/skills/codex-claude-history-viewer/scripts/start-cchv.sh
+```
+
+Alternative override:
+
+```bash
 export CCHV_REPO_DIR=/mnt/e/web/tools/Codex-Claude-History-Viewer
 bash ~/.gemini/skills/codex-claude-history-viewer/scripts/start-cchv.sh
 ```
@@ -90,6 +104,7 @@ bash ~/.gemini/skills/codex-claude-history-viewer/scripts/install-linux-desktop-
 - Keep the server bound to `127.0.0.1` unless the user explicitly asks for LAN access
 - Do not mutate raw session JSONL files unless the user explicitly asks for destructive changes
 - Prefer built-in viewer actions and sidecar metadata over raw file surgery
+- Route human confirmation here for Codex / Claude Code / OpenClaw / Hermes after content-level search or prefiltering
 - When asked whether CRUD is supported, answer precisely: the viewer has local index/state management, not general arbitrary CRUD over source logs
 
 Read `references/api-and-crud-notes.md` only when the user asks about API shape, CRUD behavior, or extension design.

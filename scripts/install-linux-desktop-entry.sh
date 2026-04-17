@@ -7,29 +7,8 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 DESKTOP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 DESKTOP_FILE="$DESKTOP_DIR/codex-claude-history-viewer.desktop"
 ICON_PATH="${ICON_PATH:-}"
-
-resolve_repo_dir() {
-  local candidates=()
-  if [[ -n "${REPO_DIR:-}" ]]; then candidates+=("$REPO_DIR"); fi
-  candidates+=(
-    "/mnt/e/web/tools/Codex-Claude-History-Viewer"
-    "$HOME/web/tools/Codex-Claude-History-Viewer"
-  )
-
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    [[ -n "$candidate" ]] || continue
-    if [[ -f "$candidate/app.py" && -d "$candidate/static" ]]; then
-      printf '%s\n' "$candidate"
-      return 0
-    fi
-  done
-
-  echo "CCHV repo not found. Set REPO_DIR or CCHV_REPO_DIR." >&2
-  return 1
-}
-
-REPO_DIR="$(resolve_repo_dir)"
+RESOLVER="$SCRIPT_DIR/resolve_cchv_repo.py"
+REPO_DIR="$("$PYTHON_BIN" "$RESOLVER" --hint "${REPO_DIR:-}" --script-dir "$SCRIPT_DIR" --cwd "$PWD")"
 
 mkdir -p "$DESKTOP_DIR"
 
