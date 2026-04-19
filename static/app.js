@@ -84,6 +84,9 @@ const SESSION_SEARCH_DEBOUNCE_MS = 220;
 const MESSAGE_RENDER_BATCH_SIZE = 20;
 const MESSAGE_COLLAPSE_THRESHOLD = 12_000;
 const MESSAGE_PREVIEW_CHARS = 4_000;
+const MESSAGE_LAZY_RENDER_ROOT_MARGIN = "800px 0px";
+const INITIAL_SESSION_MESSAGE_LIMIT = 180;
+const SESSION_MESSAGE_LOAD_STEP = 180;
 const SESSION_LIST_PAGE_LIMIT = 50;
 const PROJECT_LIST_PAGE_LIMIT = 40;
 const MARKDOWN_CACHE_INDEX_KEY = "historyViewer.markdownCache.v1.index";
@@ -93,6 +96,10 @@ const MARKDOWN_CACHE_MAX_TOTAL_CHARS = 2_500_000;
 const MARKDOWN_CACHE_MAX_ENTRY_CHARS = 160_000;
 const messageRenderCache = new WeakMap();
 let markdownCacheIndex = null;
+let messageBodyObserver = null;
+const pendingLazyMessageBodies = new Map();
+let currentMessageRenderLimit = INITIAL_SESSION_MESSAGE_LIMIT;
+let currentVisibleMessageCount = 0;
 
 function createEmptySessionSearchState(query = "") {
   return {
@@ -103,6 +110,68 @@ function createEmptySessionSearchState(query = "") {
     loading: false,
     error: "",
   };
+}
+
+function resetMessageRenderLimit() {
+  currentMessageRenderLimit = INITIAL_SESSION_MESSAGE_LIMIT;
+  currentVisibleMessageCount = 0;
+}
+
+function growMessageRenderLimit() {
+  const next = Math.min(
+    currentMessageRenderLimit + SESSION_MESSAGE_LOAD_STEP,
+    currentVisibleMessageCount || currentMessageRenderLimit,
+  );
+  if (next <= currentMessageRenderLimit) return false;
+  currentMessageRenderLimit = next;
+  return true;
+}
+
+function disconnectMessageBodyObserver() {
+  pendingLazyMessageBodies.clear();
+  if (!messageBodyObserver) return;
+  messageBodyObserver.disconnect();
+  messageBodyObserver = null;
+}
+
+function flushLazyMessageBody(body) {
+  const render = pendingLazyMessageBodies.get(body);
+  if (!render) return false;
+  pendingLazyMessageBodies.delete(body);
+  if (messageBodyObserver) {
+    messageBodyObserver.unobserve(body);
+  }
+  render();
+  return true;
+}
+
+function ensureMessageBodyObserver() {
+  if (messageBodyObserver || typeof IntersectionObserver !== "function") {
+    return messageBodyObserver;
+  }
+
+  messageBodyObserver = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (!entry.isIntersecting) return;
+      flushLazyMessageBody(entry.target);
+    });
+  }, {
+    root: messagesEl,
+    rootMargin: MESSAGE_LAZY_RENDER_ROOT_MARGIN,
+  });
+
+  return messageBodyObserver;
+}
+
+function queueLazyMessageBody(body, render) {
+  if (typeof render !== "function") return;
+  const observer = ensureMessageBodyObserver();
+  if (!observer) {
+    render();
+    return;
+  }
+  pendingLazyMessageBodies.set(body, render);
+  observer.observe(body);
 }
 
 const UI_STORAGE_KEYS = {
@@ -1315,6 +1384,7 @@ function cancelPendingMessageRender() {
     clearTimeout(sessionSearchTimer);
     sessionSearchTimer = null;
   }
+  disconnectMessageBodyObserver();
   messageRenderSeq += 1;
 }
 
@@ -1402,6 +1472,14 @@ function getSessionSearchMatch(index, term) {
   return currentSessionSearch.matches.get(index) || null;
 }
 
+function renderMessageBodyInto(body, msg, { expanded = false, searchMatch = null, term = "" } = {}) {
+  const bodyRender = getMessageBodyHtml(msg, { expanded, searchMatch });
+  body.innerHTML = bodyRender.html;
+  body.classList.remove("pending");
+  const hits = term && searchMatch ? highlightElement(body, term) : 0;
+  return { ...bodyRender, hits };
+}
+
 function buildMessageElement(msg, index, term) {
   const roleClass = roleToClass(msg.role);
   const cached = getMessageRenderData(msg);
@@ -1444,17 +1522,24 @@ function buildMessageElement(msg, index, term) {
 
   const body = document.createElement("div");
   body.className = "msg-body";
-  const bodyRender = getMessageBodyHtml(msg, { expanded, searchMatch });
-  const showingSearchExcerpt = bodyRender.mode === "search-excerpt";
-  body.innerHTML = bodyRender.html;
+  const deferBodyRender = !term;
+  let bodyRender = null;
+  if (deferBodyRender) {
+    body.classList.add("pending");
+    body.textContent = cached.collapsible ? "Rendering preview..." : "Rendering message...";
+    queueLazyMessageBody(body, () => {
+      if ("isConnected" in body && !body.isConnected) return;
+      renderMessageBodyInto(body, msg, { expanded, searchMatch: null, term: "" });
+    });
+  } else {
+    bodyRender = renderMessageBodyInto(body, msg, { expanded, searchMatch, term });
+  }
+  const showingSearchExcerpt = bodyRender?.mode === "search-excerpt";
 
   wrapper.appendChild(header);
   wrapper.appendChild(body);
 
-  let hits = 0;
-  if (term && searchMatch) {
-    hits = highlightElement(body, term);
-  }
+  let hits = bodyRender?.hits || 0;
 
   if (cached.collapsible) {
     const controls = document.createElement("div");
@@ -1493,7 +1578,7 @@ function buildMessageElement(msg, index, term) {
   return { wrapper, hits };
 }
 
-function renderMessages(messages) {
+function renderMessages(messages, { restoreScrollTop = null } = {}) {
   cancelPendingMessageRender();
   const renderSeq = messageRenderSeq;
   messagesEl.innerHTML = "";
@@ -1510,7 +1595,12 @@ function renderMessages(messages) {
     if (!roleFilters[roleClass]) return;
     visibleMessages.push({ msg, index });
   });
-  const renderedCount = visibleMessages.length;
+  currentVisibleMessageCount = visibleMessages.length;
+  const activeMessages = term
+    ? visibleMessages
+    : visibleMessages.slice(0, currentMessageRenderLimit);
+  const renderedCount = activeMessages.length;
+  const hasHiddenMessages = !term && renderedCount < currentVisibleMessageCount;
 
   if (renderedCount === 0) {
     const empty = document.createElement("div");
@@ -1551,7 +1641,7 @@ function renderMessages(messages) {
     const fragment = document.createDocumentFragment();
     const batchEnd = Math.min(offset + MESSAGE_RENDER_BATCH_SIZE, renderedCount);
     for (; offset < batchEnd; offset += 1) {
-      const { msg, index } = visibleMessages[offset];
+      const { msg, index } = activeMessages[offset];
       const rendered = buildMessageElement(msg, index, term);
       fragment.appendChild(rendered.wrapper);
     }
@@ -1579,7 +1669,20 @@ function renderMessages(messages) {
       sessionSearchCount.textContent = "";
     }
 
+    if (hasHiddenMessages) {
+      const progress = document.createElement("div");
+      progress.className = "messages-progress muted";
+      progress.innerHTML = `
+        <span>Showing ${renderedCount.toLocaleString()} of ${currentVisibleMessageCount.toLocaleString()} messages.</span>
+        <button type="button" class="btn small" data-load-more-messages="true">Load more messages</button>
+      `;
+      messagesEl.appendChild(progress);
+    }
+
     updateMatchNavState(term);
+    if (Number.isFinite(restoreScrollTop)) {
+      messagesEl.scrollTop = restoreScrollTop;
+    }
   };
 
   renderBatch();
@@ -1624,6 +1727,7 @@ function setActiveMarkIndex(index, { scroll }) {
 
 function resetSessionPane() {
   cancelPendingMessageRender();
+  resetMessageRenderLimit();
   sessionSearchFetchSeq += 1;
   currentSessionSearch = createEmptySessionSearchState();
   currentSession = null;
@@ -1905,6 +2009,7 @@ async function fetchSessions({ append = false } = {}) {
 
 async function fetchSession(sessionId) {
   const seq = (sessionFetchSeq += 1);
+  resetMessageRenderLimit();
   expandedMessageIndexes = new Set();
   renderStatusMessage("Loading…");
   try {
@@ -2174,8 +2279,29 @@ copyResumeCmdWslBtn.addEventListener("click", () => {
   copyText(resumeCmdWslEl.textContent || "");
 });
 
+messagesEl.addEventListener("scroll", () => {
+  if (sessionSearchInput.value.trim()) return;
+  if (currentMessageRenderLimit >= currentVisibleMessageCount) return;
+  const distanceToBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+  if (distanceToBottom > 900) return;
+
+  const scrollTop = messagesEl.scrollTop;
+  if (growMessageRenderLimit()) {
+    renderMessages(currentMessages, { restoreScrollTop: scrollTop });
+  }
+});
+
 messagesEl.addEventListener("click", async (event) => {
   const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+  const loadMore = target ? target.closest("[data-load-more-messages]") : null;
+  if (loadMore) {
+    const scrollTop = messagesEl.scrollTop;
+    if (growMessageRenderLimit()) {
+      renderMessages(currentMessages, { restoreScrollTop: scrollTop });
+    }
+    return;
+  }
+
   const toggle = target ? target.closest("[data-message-toggle]") : null;
   if (!toggle) return;
   const index = Number(toggle.dataset.messageToggle);

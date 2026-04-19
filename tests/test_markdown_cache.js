@@ -179,6 +179,28 @@ function createDocument() {
   };
 }
 
+class FakeIntersectionObserver {
+  constructor(callback) {
+    this.callback = callback;
+    this.targets = new Set();
+    FakeIntersectionObserver.instances.push(this);
+  }
+
+  observe(target) {
+    this.targets.add(target);
+  }
+
+  unobserve(target) {
+    this.targets.delete(target);
+  }
+
+  disconnect() {
+    this.targets.clear();
+  }
+}
+
+FakeIntersectionObserver.instances = [];
+
 function loadApp() {
   const repoDir = path.resolve(__dirname, "..");
   const sourcePath = path.join(repoDir, "static", "app.js");
@@ -188,6 +210,15 @@ globalThis.__testApi = {
   buildMessageElement,
   buildResumeCommands,
   getResumeCommandLabels,
+  flushLazyMessageBodies() {
+    const observers = (globalThis.IntersectionObserver?.instances || []).slice();
+    observers.forEach((observer) => {
+      const entries = [...observer.targets].map((target) => ({ target, isIntersecting: true }));
+      if (entries.length) {
+        observer.callback(entries);
+      }
+    });
+  },
   setCurrentSession(value) { currentSession = value; },
   setCurrentSystem(value) { currentSystem = value; },
   setCurrentSource(value) { currentSource = value; },
@@ -244,6 +275,7 @@ globalThis.__testApi = {
     URLSearchParams,
     Element: FakeElement,
     NodeFilter: { SHOW_TEXT: 4 },
+    IntersectionObserver: FakeIntersectionObserver,
   });
 
   vm.runInContext(source, context, { filename: sourcePath });
@@ -334,6 +366,38 @@ function testSearchHitUsesExcerptInsteadOfAutoExpandingFullLongMessage() {
   assert.deepEqual(renderedInputs, ["...\nneedle nearby\n..."]);
 }
 
+function testMessageBodiesRenderLazilyUntilVisible() {
+  const { api } = loadApp();
+  const renderedInputs = [];
+  api.setCurrentSystem("windows");
+  api.setCurrentSource("codex");
+  api.setCurrentSession({ id: "session-lazy" });
+  api.setExpandedMessageIndexes([]);
+  api.setCurrentSessionSearchData("", []);
+  api.setRenderMarkdown((text) => {
+    renderedInputs.push(text);
+    return `rendered:${text}`;
+  });
+
+  const msg = {
+    message_index: 0,
+    role: "assistant",
+    kind: "message",
+    text: "lazy body",
+  };
+  const rendered = api.buildMessageElement(msg, 0, "");
+  const body = rendered.wrapper.children[1];
+
+  assert.equal(body.textContent, "Rendering message...");
+  assert.equal(body.innerHTML, "");
+  assert.deepEqual(renderedInputs, []);
+
+  api.flushLazyMessageBodies();
+
+  assert.equal(body.innerHTML, "rendered:lazy body");
+  assert.deepEqual(renderedInputs, ["lazy body"]);
+}
+
 function testLinuxResumeCommandsUseShellFriendlyVariants() {
   const { api } = loadApp();
   const labels = api.getResumeCommandLabels("linux");
@@ -361,5 +425,6 @@ function testClaudeResumeCommandsAppendDangerousSkipPermissions() {
 testPersistentCacheReusesRenderedHtmlAcrossMessageObjects();
 testPreviewAndFullModesUseDistinctPersistentEntries();
 testSearchHitUsesExcerptInsteadOfAutoExpandingFullLongMessage();
+testMessageBodiesRenderLazilyUntilVisible();
 testLinuxResumeCommandsUseShellFriendlyVariants();
 testClaudeResumeCommandsAppendDangerousSkipPermissions();

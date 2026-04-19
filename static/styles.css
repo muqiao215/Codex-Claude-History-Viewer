@@ -521,6 +521,8 @@ body.is-resizing {
   padding: 12px;
   background: var(--panel);
   border: 1px solid var(--border);
+  content-visibility: auto;
+  contain-intrinsic-size: auto 220px;
 }
 
 .msg.user {
@@ -556,6 +558,11 @@ body.is-resizing {
   line-height: 1.4;
 }
 
+.msg-body.pending {
+  min-height: 1.4em;
+  color: var(--muted);
+}
+
 .msg-controls {
   display: flex;
   justify-content: space-between;
@@ -573,6 +580,17 @@ body.is-resizing {
 
 .msg-toggle {
   flex-shrink: 0;
+}
+
+.messages-progress {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  text-align: center;
+  padding: 10px 0 18px;
+  font-size: 12px;
 }
 
 .session-info {
