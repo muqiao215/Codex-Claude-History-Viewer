@@ -8,6 +8,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timezone, time as dt_time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,13 +18,39 @@ MAX_SEARCH_CHARS = 2_000_000
 DEFAULT_LIMIT = 200
 MESSAGE_INLINE_FULL_THRESHOLD = 12_000
 MESSAGE_PREVIEW_CHARS = 4_000
+MESSAGE_PREVIEW_FETCH_CHARS = MESSAGE_PREVIEW_CHARS + 2_048
 SEARCH_MATCH_CONTEXT_CHARS = 1_600
 SEARCH_MATCH_MAX_CHARS = 3_600
 DEFAULT_PAGE_LIMIT = 50
+SESSION_PREVIEW_CACHE_SIZE = 12
 
 
 def detect_runtime_system(os_name=None):
     return "windows" if str(os_name or os.name).lower() == "nt" else "linux"
+
+
+def build_truncated_message_preview(text, preview_chars=MESSAGE_PREVIEW_CHARS):
+    value = str(text or "")
+    preview = value[:preview_chars]
+    last_newline = preview.rfind("\n")
+    if last_newline >= int(preview_chars * 0.6):
+        preview = preview[:last_newline]
+    return (
+        preview.rstrip()
+        + "\n\n---\nPreview truncated for performance. Expand to render the full message."
+    )
+
+
+def normalize_message_payload(text, *, include_full_text=False, char_count=None, is_truncated=None):
+    value = str(text or "")
+    total_chars = len(value) if char_count is None else int(char_count)
+    truncated = bool(is_truncated) if is_truncated is not None else (
+        (not include_full_text) and total_chars > MESSAGE_INLINE_FULL_THRESHOLD
+    )
+    rendered = value
+    if not include_full_text and truncated:
+        rendered = build_truncated_message_preview(value)
+    return rendered, total_chars, truncated
 
 
 class RecallTitleStore:
@@ -1130,7 +1157,23 @@ class Indexer:
         self.last_scan = 0
         self.scan_interval = max(1, int(scan_interval))
         self._local_title_backfill_done = False
+        self._session_preview_cache = OrderedDict()
         self._init_db()
+
+    def _clear_session_preview_cache(self, session_id=None):
+        if session_id is None:
+            self._session_preview_cache.clear()
+            return
+        self._session_preview_cache.pop(str(session_id), None)
+
+    def _remember_session_preview_cache(self, session_id, payload):
+        key = str(session_id or "")
+        if not key:
+            return
+        self._session_preview_cache[key] = payload
+        self._session_preview_cache.move_to_end(key)
+        while len(self._session_preview_cache) > SESSION_PREVIEW_CACHE_SIZE:
+            self._session_preview_cache.popitem(last=False)
 
     def _init_db(self):
         with self.lock:
@@ -1194,6 +1237,7 @@ class Indexer:
             return
         session_files = [p for p in self.sessions_dir.rglob("*.jsonl") if self._file_filter_fn(p)]
         with self.lock:
+            self._clear_session_preview_cache()
             for path in session_files:
                 try:
                     mtime = path.stat().st_mtime
@@ -1428,20 +1472,28 @@ class Indexer:
         }
 
     def _serialize_message_row(self, row, message_index, include_full_text=False):
-        text = str(row["text"] or "")
-        is_truncated = (not include_full_text) and len(text) > MESSAGE_INLINE_FULL_THRESHOLD
+        text, char_count, is_truncated = normalize_message_payload(
+            row["text"],
+            include_full_text=include_full_text,
+            char_count=row["char_count"] if "char_count" in row.keys() else None,
+            is_truncated=row["is_truncated"] if "is_truncated" in row.keys() else None,
+        )
         return {
             "message_index": int(message_index),
             "ts_ms": row["ts_ms"],
             "role": row["role"],
             "kind": row["kind"],
-            "text": text if not is_truncated else build_message_preview_text(text),
-            "char_count": len(text),
+            "text": text,
+            "char_count": char_count,
             "is_truncated": bool(is_truncated),
         }
 
     def get_session(self, session_id):
         with self.lock:
+            cached = self._session_preview_cache.get(str(session_id))
+            if cached is not None:
+                self._session_preview_cache.move_to_end(str(session_id))
+                return cached
             session = self.conn.execute(
                 "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned FROM sessions WHERE id = ?",
                 (session_id,),
@@ -1449,16 +1501,40 @@ class Indexer:
             if not session:
                 return None
             messages = self.conn.execute(
-                "SELECT ts_ms, role, kind, text FROM messages WHERE session_id = ? ORDER BY ts_ms ASC, id ASC",
-                (session_id,),
+                """
+                SELECT
+                    ts_ms,
+                    role,
+                    kind,
+                    CASE
+                        WHEN LENGTH(text) > ? THEN SUBSTR(text, 1, ?)
+                        ELSE text
+                    END AS text,
+                    LENGTH(text) AS char_count,
+                    CASE
+                        WHEN LENGTH(text) > ? THEN 1
+                        ELSE 0
+                    END AS is_truncated
+                FROM messages
+                WHERE session_id = ?
+                ORDER BY ts_ms ASC, id ASC
+                """,
+                (
+                    MESSAGE_INLINE_FULL_THRESHOLD,
+                    MESSAGE_PREVIEW_FETCH_CHARS,
+                    MESSAGE_INLINE_FULL_THRESHOLD,
+                    session_id,
+                ),
             ).fetchall()
-        return {
-            "session": dict(session),
-            "messages": [
-                self._serialize_message_row(row, idx)
-                for idx, row in enumerate(messages)
-            ],
-        }
+            payload = {
+                "session": dict(session),
+                "messages": [
+                    self._serialize_message_row(row, idx)
+                    for idx, row in enumerate(messages)
+                ],
+            }
+            self._remember_session_preview_cache(session_id, payload)
+            return payload
 
     def get_session_message(self, session_id, message_index):
         try:
@@ -1563,6 +1639,9 @@ class Indexer:
 
         if updated and self.recall_titles:
             self.recall_titles.set_custom_title(session_id, title)
+        if updated:
+            with self.lock:
+                self._clear_session_preview_cache(session_id)
 
         return updated
 
@@ -1584,6 +1663,7 @@ class Indexer:
             self.conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
             self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             self.conn.commit()
+            self._clear_session_preview_cache(session_id)
             return True, "archived"
 
     def _delete_sessions_with_backup(self, rows, deleted_dir, backup_label):
@@ -1616,6 +1696,8 @@ class Indexer:
                 session_ids,
             )
             self.conn.commit()
+            for session_id in session_ids:
+                self._clear_session_preview_cache(session_id)
         return len(session_ids), str(backup_dir)
 
     def delete_project_sessions(self, project, deleted_dir):
@@ -1674,6 +1756,8 @@ class Indexer:
                 "UPDATE sessions SET pinned = ? WHERE id = ?", (1 if pinned else 0, session_id)
             )
             self.conn.commit()
+            if cur.rowcount > 0:
+                self._clear_session_preview_cache(session_id)
             return cur.rowcount > 0
 
 
@@ -1688,6 +1772,16 @@ class HermesStateIndexer:
         )
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.Lock()
+        self._session_preview_cache = OrderedDict()
+
+    def _remember_session_preview_cache(self, session_id, payload):
+        key = str(session_id or "")
+        if not key:
+            return
+        self._session_preview_cache[key] = payload
+        self._session_preview_cache.move_to_end(key)
+        while len(self._session_preview_cache) > SESSION_PREVIEW_CACHE_SIZE:
+            self._session_preview_cache.popitem(last=False)
 
     def maybe_update_index(self, max_age_seconds=None):
         return
@@ -1779,11 +1873,16 @@ class HermesStateIndexer:
         content = str(row["content"] or "")
         reasoning = str(row["reasoning"] or "")
         tool_calls = str(row["tool_calls"] or "").strip()
+        char_count_hint = None
+        is_truncated_hint = None
 
         if role == "tool":
             mapped_role = "tool"
             kind = "tool_result"
             text = content
+            if "content_char_count" in row.keys():
+                char_count_hint = row["content_char_count"]
+                is_truncated_hint = row["content_is_truncated"]
         elif tool_calls:
             mapped_role = "assistant"
             kind = "tool_use"
@@ -1792,23 +1891,34 @@ class HermesStateIndexer:
             mapped_role = role
             kind = "message"
             text = content
+            if "content_char_count" in row.keys():
+                char_count_hint = row["content_char_count"]
+                is_truncated_hint = row["content_is_truncated"]
         elif reasoning:
             mapped_role = role
             kind = "reasoning_summary"
             text = reasoning
+            if "reasoning_char_count" in row.keys():
+                char_count_hint = row["reasoning_char_count"]
+                is_truncated_hint = row["reasoning_is_truncated"]
         else:
             mapped_role = role
             kind = "message"
             text = ""
 
-        is_truncated = (not include_full_text) and len(text) > MESSAGE_INLINE_FULL_THRESHOLD
+        text, char_count, is_truncated = normalize_message_payload(
+            text,
+            include_full_text=include_full_text,
+            char_count=char_count_hint,
+            is_truncated=is_truncated_hint,
+        )
         return {
             "message_index": int(message_index),
             "ts_ms": parse_ts(row["timestamp"]),
             "role": mapped_role,
             "kind": kind,
-            "text": text if not is_truncated else build_message_preview_text(text),
-            "char_count": len(text),
+            "text": text,
+            "char_count": char_count,
             "is_truncated": bool(is_truncated),
         }
 
@@ -1911,25 +2021,62 @@ class HermesStateIndexer:
 
     def get_session(self, session_id):
         with self.lock:
+            cached = self._session_preview_cache.get(str(session_id))
+            if cached is not None:
+                self._session_preview_cache.move_to_end(str(session_id))
+                return cached
             session = self._session_lookup(session_id)
             if not session:
                 return None
             messages = self.conn.execute(
                 """
-                SELECT id, timestamp, role, content, tool_calls, tool_name, reasoning
+                SELECT
+                    id,
+                    timestamp,
+                    role,
+                    CASE
+                        WHEN LENGTH(content) > ? THEN SUBSTR(content, 1, ?)
+                        ELSE content
+                    END AS content,
+                    LENGTH(content) AS content_char_count,
+                    CASE
+                        WHEN LENGTH(content) > ? THEN 1
+                        ELSE 0
+                    END AS content_is_truncated,
+                    tool_calls,
+                    tool_name,
+                    CASE
+                        WHEN LENGTH(reasoning) > ? THEN SUBSTR(reasoning, 1, ?)
+                        ELSE reasoning
+                    END AS reasoning,
+                    LENGTH(reasoning) AS reasoning_char_count,
+                    CASE
+                        WHEN LENGTH(reasoning) > ? THEN 1
+                        ELSE 0
+                    END AS reasoning_is_truncated
                 FROM messages
                 WHERE session_id = ?
                 ORDER BY timestamp ASC, id ASC
                 """,
-                (session_id,),
+                (
+                    MESSAGE_INLINE_FULL_THRESHOLD,
+                    MESSAGE_PREVIEW_FETCH_CHARS,
+                    MESSAGE_INLINE_FULL_THRESHOLD,
+                    MESSAGE_INLINE_FULL_THRESHOLD,
+                    MESSAGE_PREVIEW_FETCH_CHARS,
+                    MESSAGE_INLINE_FULL_THRESHOLD,
+                    session_id,
+                ),
             ).fetchall()
-        return {
-            "session": self._serialize_session_row(session),
-            "messages": [
-                self._serialize_message_row(row, idx)
-                for idx, row in enumerate(messages)
-            ],
-        }
+            payload = {
+                "session": self._serialize_session_row(session),
+                "messages": [
+                    self._serialize_message_row(row, idx)
+                    for idx, row in enumerate(messages)
+                ],
+            }
+            self._remember_session_preview_cache(session_id, payload)
+            return payload
 
     def get_session_message(self, session_id, message_index):
         try:
