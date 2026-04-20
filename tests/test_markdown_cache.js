@@ -242,6 +242,7 @@ globalThis.__testApi = {
       prefix: MARKDOWN_CACHE_ENTRY_PREFIX,
     };
   },
+  buildMessageRenderPlan,
 };
 `;
 
@@ -422,9 +423,70 @@ function testClaudeResumeCommandsAppendDangerousSkipPermissions() {
   );
 }
 
+function testBrowseRenderPlanShowsLatestWindowOnly() {
+  const { api } = loadApp();
+  const messages = Array.from({ length: 450 }, (_, index) => ({
+    role: "assistant",
+    kind: "message",
+    text: `msg-${index}`,
+  }));
+  const plan = api.buildMessageRenderPlan(
+    messages,
+    {
+      user: true,
+      assistant: true,
+      system: true,
+      developer: true,
+      tool: true,
+      other: true,
+    },
+    "",
+    { query: "", matches: new Map(), loading: false, error: "" },
+    200,
+  );
+  assert.equal(plan.mode, "browse");
+  assert.equal(plan.totalVisible, 450);
+  assert.equal(plan.hiddenBefore, 250);
+  assert.equal(plan.items.length, 200);
+  assert.equal(plan.items[0].msg.text, "msg-250");
+  assert.equal(plan.items.at(-1).msg.text, "msg-449");
+}
+
+function testSearchRenderPlanOnlyReturnsMatchedWindow() {
+  const { api } = loadApp();
+  const messages = Array.from({ length: 250 }, (_, index) => ({
+    role: index % 2 === 0 ? "assistant" : "tool",
+    kind: "message",
+    text: `message-${index}`,
+  }));
+  const matches = new Map(messages.map((_, index) => [index, { hit_count: 1 }]));
+  const plan = api.buildMessageRenderPlan(
+    messages,
+    {
+      user: true,
+      assistant: true,
+      system: true,
+      developer: true,
+      tool: true,
+      other: true,
+    },
+    "ta",
+    { query: "ta", matches, loading: false, error: "" },
+    200,
+  );
+  assert.equal(plan.mode, "search");
+  assert.equal(plan.totalVisible, 250);
+  assert.equal(plan.items.length, 200);
+  assert.equal(plan.hiddenAfter, 50);
+  assert.equal(plan.items[0].index, 0);
+  assert.equal(plan.items.at(-1).index, 199);
+}
+
 testPersistentCacheReusesRenderedHtmlAcrossMessageObjects();
 testPreviewAndFullModesUseDistinctPersistentEntries();
 testSearchHitUsesExcerptInsteadOfAutoExpandingFullLongMessage();
 testMessageBodiesRenderLazilyUntilVisible();
 testLinuxResumeCommandsUseShellFriendlyVariants();
 testClaudeResumeCommandsAppendDangerousSkipPermissions();
+testBrowseRenderPlanShowsLatestWindowOnly();
+testSearchRenderPlanOnlyReturnsMatchedWindow();

@@ -118,6 +118,24 @@ class SessionPreviewTests(unittest.TestCase):
         self.assertIn("excerpt_text", result["matches"][0])
         self.assertIn("needle", result["matches"][0]["excerpt_text"].lower())
         self.assertLess(len(result["matches"][0]["excerpt_text"]), result["matches"][0]["char_count"])
+
+    def test_search_session_messages_limit_keeps_total_counts(self):
+        with self.indexer.lock:
+            self.indexer.conn.execute(
+                """
+                INSERT INTO messages (session_id, ts_ms, role, kind, text)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                ("session-1", 3, "assistant", "message", "another needle message"),
+            )
+            self.indexer.conn.commit()
+
+        result = self.indexer.search_session_messages("session-1", "needle", limit=1)
+
+        self.assertEqual(result["query"], "needle")
+        self.assertEqual(result["message_match_count"], 2)
+        self.assertEqual(result["match_count"], 3)
+        self.assertEqual(len(result["matches"]), 1)
         self.assertGreaterEqual(result["matches"][0]["excerpt_start"], 0)
         self.assertGreater(result["matches"][0]["excerpt_end"], result["matches"][0]["excerpt_start"])
 

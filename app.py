@@ -1237,43 +1237,53 @@ class Indexer:
             return
         session_files = [p for p in self.sessions_dir.rglob("*.jsonl") if self._file_filter_fn(p)]
         with self.lock:
-            self._clear_session_preview_cache()
-            for path in session_files:
-                try:
-                    mtime = path.stat().st_mtime
-                except FileNotFoundError:
-                    continue
+            existing_rows = self.conn.execute(
+                "SELECT id, file_path, mtime, parser_version, title FROM sessions"
+            ).fetchall()
+        existing_by_path = {str(row["file_path"]): row for row in existing_rows}
 
-                row = self.conn.execute(
-                    "SELECT id, mtime, parser_version, title FROM sessions WHERE file_path = ?",
-                    (str(path),),
-                ).fetchone()
+        updates = []
+        for path in session_files:
+            try:
+                mtime = path.stat().st_mtime
+            except FileNotFoundError:
+                continue
+
+            row = existing_by_path.get(str(path))
+            if (
+                row
+                and row["mtime"] is not None
+                and row["mtime"] >= mtime
+                and row["parser_version"] == self.parser_version
+            ):
+                continue
+
+            session = self._parse_file_fn(path)
+            if session is None:
+                continue
+
+            if self.recall_titles:
+                custom_title = self.recall_titles.get_custom_title(session["id"])
                 if (
-                    row
-                    and row["mtime"] is not None
-                    and row["mtime"] >= mtime
-                    and row["parser_version"] == self.parser_version
+                    not custom_title
+                    and row
+                    and row["title"]
+                    and str(row["title"]).strip()
+                    and str(row["title"]).strip() != str(session["title"]).strip()
                 ):
-                    continue
+                    custom_title = str(row["title"]).strip()
+                    self.recall_titles.set_custom_title(session["id"], custom_title)
+                if custom_title:
+                    session["title"] = custom_title
 
-                session = self._parse_file_fn(path)
-                if session is None:
-                    continue
+            updates.append((row, session, mtime))
 
-                if self.recall_titles:
-                    custom_title = self.recall_titles.get_custom_title(session["id"])
-                    if (
-                        not custom_title
-                        and row
-                        and row["title"]
-                        and str(row["title"]).strip()
-                        and str(row["title"]).strip() != str(session["title"]).strip()
-                    ):
-                        custom_title = str(row["title"]).strip()
-                        self.recall_titles.set_custom_title(session["id"], custom_title)
-                    if custom_title:
-                        session["title"] = custom_title
+        if not updates:
+            return
 
+        with self.lock:
+            self._clear_session_preview_cache()
+            for row, session, mtime in updates:
                 if row and row["id"] != session["id"]:
                     self.conn.execute("DELETE FROM messages WHERE session_id = ?", (row["id"],))
                     self.conn.execute("DELETE FROM sessions WHERE id = ?", (row["id"],))
@@ -1565,7 +1575,7 @@ class Indexer:
             return None
         return self._serialize_message_row(row, offset, include_full_text=True)
 
-    def search_session_messages(self, session_id, query):
+    def search_session_messages(self, session_id, query, limit=None):
         term = str(query or "").strip()
         result = {
             "query": term,
@@ -1595,8 +1605,16 @@ class Indexer:
                 (session_id,),
             ).fetchall()
 
+        try:
+            clean_limit = int(limit) if limit is not None else None
+        except (TypeError, ValueError):
+            clean_limit = None
+        if clean_limit is not None and clean_limit <= 0:
+            clean_limit = None
+
         matches = []
         total_hits = 0
+        total_message_matches = 0
         for idx, row in enumerate(rows):
             text = str(row["text"] or "")
             found = list(pattern.finditer(text))
@@ -1604,25 +1622,27 @@ class Indexer:
             if hit_count <= 0:
                 continue
             total_hits += hit_count
-            serialized = self._serialize_message_row(row, idx)
-            excerpt = build_search_excerpt_text(text, found[0].start(), found[0].end())
-            matches.append({
-                "message_index": idx,
-                "ts_ms": row["ts_ms"],
-                "role": row["role"],
-                "kind": row["kind"],
-                "hit_count": hit_count,
-                "char_count": serialized["char_count"],
-                "is_truncated": serialized["is_truncated"],
-                "excerpt_text": excerpt["text"],
-                "excerpt_start": excerpt["start"],
-                "excerpt_end": excerpt["end"],
-                "excerpt_has_more_before": excerpt["has_more_before"],
-                "excerpt_has_more_after": excerpt["has_more_after"],
-            })
+            total_message_matches += 1
+            if clean_limit is None or len(matches) < clean_limit:
+                serialized = self._serialize_message_row(row, idx)
+                excerpt = build_search_excerpt_text(text, found[0].start(), found[0].end())
+                matches.append({
+                    "message_index": idx,
+                    "ts_ms": row["ts_ms"],
+                    "role": row["role"],
+                    "kind": row["kind"],
+                    "hit_count": hit_count,
+                    "char_count": serialized["char_count"],
+                    "is_truncated": serialized["is_truncated"],
+                    "excerpt_text": excerpt["text"],
+                    "excerpt_start": excerpt["start"],
+                    "excerpt_end": excerpt["end"],
+                    "excerpt_has_more_before": excerpt["has_more_before"],
+                    "excerpt_has_more_after": excerpt["has_more_after"],
+                })
 
         result["match_count"] = total_hits
-        result["message_match_count"] = len(matches)
+        result["message_match_count"] = total_message_matches
         result["matches"] = matches
         return result
 
@@ -2104,7 +2124,7 @@ class HermesStateIndexer:
             return None
         return self._serialize_message_row(row, offset, include_full_text=True)
 
-    def search_session_messages(self, session_id, query):
+    def search_session_messages(self, session_id, query, limit=None):
         term = str(query or "").strip()
         result = {
             "query": term,
@@ -2131,8 +2151,16 @@ class HermesStateIndexer:
                 (session_id,),
             ).fetchall()
 
+        try:
+            clean_limit = int(limit) if limit is not None else None
+        except (TypeError, ValueError):
+            clean_limit = None
+        if clean_limit is not None and clean_limit <= 0:
+            clean_limit = None
+
         matches = []
         total_hits = 0
+        total_message_matches = 0
         for idx, row in enumerate(rows):
             serialized = self._serialize_message_row(row, idx, include_full_text=True)
             text = str(serialized["text"] or "")
@@ -2140,24 +2168,26 @@ class HermesStateIndexer:
             if not found:
                 continue
             total_hits += len(found)
-            excerpt = build_search_excerpt_text(text, found[0].start(), found[0].end())
-            matches.append({
-                "message_index": idx,
-                "ts_ms": serialized["ts_ms"],
-                "role": serialized["role"],
-                "kind": serialized["kind"],
-                "hit_count": len(found),
-                "char_count": serialized["char_count"],
-                "is_truncated": serialized["char_count"] > MESSAGE_INLINE_FULL_THRESHOLD,
-                "excerpt_text": excerpt["text"],
-                "excerpt_start": excerpt["start"],
-                "excerpt_end": excerpt["end"],
-                "excerpt_has_more_before": excerpt["has_more_before"],
-                "excerpt_has_more_after": excerpt["has_more_after"],
-            })
+            total_message_matches += 1
+            if clean_limit is None or len(matches) < clean_limit:
+                excerpt = build_search_excerpt_text(text, found[0].start(), found[0].end())
+                matches.append({
+                    "message_index": idx,
+                    "ts_ms": serialized["ts_ms"],
+                    "role": serialized["role"],
+                    "kind": serialized["kind"],
+                    "hit_count": len(found),
+                    "char_count": serialized["char_count"],
+                    "is_truncated": serialized["char_count"] > MESSAGE_INLINE_FULL_THRESHOLD,
+                    "excerpt_text": excerpt["text"],
+                    "excerpt_start": excerpt["start"],
+                    "excerpt_end": excerpt["end"],
+                    "excerpt_has_more_before": excerpt["has_more_before"],
+                    "excerpt_has_more_after": excerpt["has_more_after"],
+                })
 
         result["match_count"] = total_hits
-        result["message_match_count"] = len(matches)
+        result["message_match_count"] = total_message_matches
         result["matches"] = matches
         return result
 
@@ -2235,6 +2265,7 @@ class SourceBackend:
         self.deleted_dir = Path(deleted_dir)
         self.ensure_fn = ensure_fn
         self.read_only = bool(read_only)
+        self.scan_interval = max(1, int(scan_interval))
         if indexer_factory is not None:
             self.indexer = indexer_factory()
         else:
@@ -2251,10 +2282,35 @@ class SourceBackend:
             )
         if self.ensure_fn is None:
             self.indexer.maybe_update_index(max_age_seconds=0)
+        self._start_background_refresh(run_immediately=self.ensure_fn is not None)
 
     def ensure_ready(self):
         if self.ensure_fn:
             self.ensure_fn()
+
+    def _refresh_index_once(self):
+        self.ensure_ready()
+        self.indexer.maybe_update_index(max_age_seconds=0)
+
+    def _background_refresh_loop(self, run_immediately=False):
+        if not run_immediately:
+            time.sleep(self.scan_interval)
+        while True:
+            try:
+                self._refresh_index_once()
+            except Exception:
+                pass
+            time.sleep(self.scan_interval)
+
+    def _start_background_refresh(self, run_immediately=False):
+        thread = threading.Thread(
+            target=self._background_refresh_loop,
+            kwargs={"run_immediately": run_immediately},
+            name=f"history-viewer-scan-{self.system}-{self.source}",
+            daemon=True,
+        )
+        thread.start()
+        self._refresh_thread = thread
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -2452,7 +2508,6 @@ class Handler(SimpleHTTPRequestHandler):
         })
 
     def handle_sessions(self, parsed, backend):
-        backend.indexer.maybe_update_index()
         params = parse_qs(parsed.query)
         q = params.get("q", [""])[0].strip() or None
         start = params.get("start", [None])[0]
@@ -2483,7 +2538,6 @@ class Handler(SimpleHTTPRequestHandler):
         })
 
     def handle_projects(self, parsed, backend):
-        backend.indexer.maybe_update_index()
         params = parse_qs(parsed.query)
         q = params.get("q", [""])[0].strip() or None
         limit = params.get("limit", [DEFAULT_PAGE_LIMIT])[0]
@@ -2498,7 +2552,6 @@ class Handler(SimpleHTTPRequestHandler):
         })
 
     def handle_session(self, session_id, backend):
-        backend.indexer.maybe_update_index()
         data = backend.indexer.get_session(session_id)
         if not data:
             return self.send_json({"error": "not_found"}, status=404)
@@ -2507,7 +2560,6 @@ class Handler(SimpleHTTPRequestHandler):
     def handle_session_message(self, session_id, message_index, backend):
         if session_id is None or message_index is None:
             return self.send_json({"error": "not_found"}, status=404)
-        backend.indexer.maybe_update_index()
         data = backend.indexer.get_session_message(session_id, message_index)
         if not data:
             return self.send_json({"error": "not_found"}, status=404)
@@ -2516,10 +2568,10 @@ class Handler(SimpleHTTPRequestHandler):
     def handle_session_search(self, session_id, parsed, backend):
         if session_id is None:
             return self.send_json({"error": "not_found"}, status=404)
-        backend.indexer.maybe_update_index()
         params = parse_qs(parsed.query)
         query = params.get("q", [""])[0]
-        data = backend.indexer.search_session_messages(session_id, query)
+        limit = params.get("limit", [None])[0]
+        data = backend.indexer.search_session_messages(session_id, query, limit=limit)
         if data is None:
             return self.send_json({"error": "not_found"}, status=404)
         return self.send_json(data)

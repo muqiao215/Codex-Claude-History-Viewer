@@ -82,11 +82,12 @@ const SOURCE_ORDER = ["codex", "claude", "openclaw", "hermes"];
 const LIST_RELOAD_DEBOUNCE_MS = 200;
 const SESSION_SEARCH_DEBOUNCE_MS = 220;
 const MESSAGE_RENDER_BATCH_SIZE = 20;
+const MESSAGE_RENDER_PAGE_SIZE = 200;
 const MESSAGE_COLLAPSE_THRESHOLD = 12_000;
 const MESSAGE_PREVIEW_CHARS = 4_000;
 const MESSAGE_LAZY_RENDER_ROOT_MARGIN = "800px 0px";
-const INITIAL_SESSION_MESSAGE_LIMIT = 180;
-const SESSION_MESSAGE_LOAD_STEP = 180;
+const INITIAL_SESSION_MESSAGE_LIMIT = MESSAGE_RENDER_PAGE_SIZE;
+const SESSION_MESSAGE_LOAD_STEP = MESSAGE_RENDER_PAGE_SIZE;
 const SESSION_LIST_PAGE_LIMIT = 50;
 const PROJECT_LIST_PAGE_LIMIT = 40;
 const MARKDOWN_CACHE_INDEX_KEY = "historyViewer.markdownCache.v1.index";
@@ -115,6 +116,14 @@ function createEmptySessionSearchState(query = "") {
 function resetMessageRenderLimit() {
   currentMessageRenderLimit = INITIAL_SESSION_MESSAGE_LIMIT;
   currentVisibleMessageCount = 0;
+}
+
+function resetMessageRenderCount() {
+  resetMessageRenderLimit();
+}
+
+function getSafeMessageRenderCount() {
+  return Math.max(INITIAL_SESSION_MESSAGE_LIMIT, Number(currentMessageRenderLimit) || 0);
 }
 
 function growMessageRenderLimit() {
@@ -1480,6 +1489,113 @@ function renderMessageBodyInto(body, msg, { expanded = false, searchMatch = null
   return { ...bodyRender, hits };
 }
 
+function buildMessageRenderPlan(messages, roleFilters, term, sessionSearch, renderCount) {
+  const normalizedTerm = String(term || "").trim();
+  const visibleMessages = [];
+  messages.forEach((msg, index) => {
+    const roleClass = roleToClass(msg.role);
+    if (!roleFilters[roleClass]) return;
+    visibleMessages.push({ msg, index });
+  });
+
+  const safeRenderCount = Math.max(MESSAGE_RENDER_PAGE_SIZE, Number(renderCount) || 0);
+  if (!normalizedTerm) {
+    const hiddenBefore = Math.max(0, visibleMessages.length - safeRenderCount);
+    return {
+      mode: "browse",
+      items: visibleMessages.slice(hiddenBefore),
+      totalVisible: visibleMessages.length,
+      hiddenBefore,
+      hiddenAfter: 0,
+      loading: false,
+      error: "",
+    };
+  }
+
+  if (sessionSearch?.query !== normalizedTerm) {
+    return {
+      mode: "search",
+      items: [],
+      totalVisible: 0,
+      hiddenBefore: 0,
+      hiddenAfter: 0,
+      loading: true,
+      error: "",
+    };
+  }
+
+  if (sessionSearch?.loading) {
+    return {
+      mode: "search",
+      items: [],
+      totalVisible: 0,
+      hiddenBefore: 0,
+      hiddenAfter: 0,
+      loading: true,
+      error: "",
+    };
+  }
+
+  if (sessionSearch?.error) {
+    return {
+      mode: "search",
+      items: [],
+      totalVisible: 0,
+      hiddenBefore: 0,
+      hiddenAfter: 0,
+      loading: false,
+      error: sessionSearch.error,
+    };
+  }
+
+  const matches = sessionSearch?.matches && typeof sessionSearch.matches.has === "function"
+    ? sessionSearch.matches
+    : new Map();
+  const matchedMessages = visibleMessages.filter(({ index }) => matches.has(index));
+  const totalVisible = Number.isFinite(sessionSearch?.messageMatchCount)
+    ? sessionSearch.messageMatchCount
+    : matchedMessages.length;
+  const items = matchedMessages.slice(0, safeRenderCount);
+  return {
+    mode: "search",
+    items,
+    totalVisible,
+    hiddenBefore: 0,
+    hiddenAfter: Math.max(0, totalVisible - items.length),
+    loading: false,
+    error: "",
+  };
+}
+
+function buildMessageWindowControl(plan) {
+  if (!plan) return null;
+  if (plan.mode === "browse" && plan.hiddenBefore <= 0) return null;
+  if (plan.mode === "search" && plan.hiddenAfter <= 0) return null;
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "message-window-card";
+
+  const note = document.createElement("div");
+  note.className = "message-window-note";
+  if (plan.mode === "browse") {
+    note.textContent = `Showing latest ${plan.items.length.toLocaleString()} of ${plan.totalVisible.toLocaleString()} messages. Load earlier messages to render more history.`;
+  } else {
+    note.textContent = `Showing ${plan.items.length.toLocaleString()} of ${plan.totalVisible.toLocaleString()} matched messages. Load more matches if needed.`;
+  }
+  wrapper.appendChild(note);
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn small";
+  button.dataset.messageWindowAction = "more";
+  button.textContent = plan.mode === "browse"
+    ? `Load ${Math.min(MESSAGE_RENDER_PAGE_SIZE, plan.hiddenBefore).toLocaleString()} earlier messages`
+    : `Load ${Math.min(MESSAGE_RENDER_PAGE_SIZE, plan.hiddenAfter).toLocaleString()} more matches`;
+  wrapper.appendChild(button);
+
+  return wrapper;
+}
+
 function buildMessageElement(msg, index, term) {
   const roleClass = roleToClass(msg.role);
   const cached = getMessageRenderData(msg);
@@ -1596,18 +1712,35 @@ function renderMessages(messages, { restoreScrollTop = null } = {}) {
     visibleMessages.push({ msg, index });
   });
   currentVisibleMessageCount = visibleMessages.length;
-  const activeMessages = term
-    ? visibleMessages
-    : visibleMessages.slice(0, currentMessageRenderLimit);
+  const renderPlan = term
+    ? buildMessageRenderPlan(
+        messages,
+        roleFilters,
+        term,
+        currentSessionSearch,
+        getSafeMessageRenderCount(),
+      )
+    : null;
+  const activeMessages = term ? renderPlan.items : visibleMessages.slice(0, currentMessageRenderLimit);
   const renderedCount = activeMessages.length;
   const hasHiddenMessages = !term && renderedCount < currentVisibleMessageCount;
 
   if (renderedCount === 0) {
     const empty = document.createElement("div");
     empty.className = "muted";
-    empty.textContent = messages.length
-      ? "No messages match the current role filters."
-      : "No messages in this session.";
+    if (term) {
+      if (renderPlan.loading) {
+        empty.textContent = "Searching within this session…";
+      } else if (renderPlan.error) {
+        empty.textContent = renderPlan.error;
+      } else {
+        empty.textContent = "No messages match the current search.";
+      }
+    } else {
+      empty.textContent = messages.length
+        ? "No messages match the current role filters."
+        : "No messages in this session.";
+    }
     messagesEl.appendChild(empty);
     if (term) {
       if (currentSessionSearch.query === term) {
@@ -1628,10 +1761,19 @@ function renderMessages(messages, { restoreScrollTop = null } = {}) {
     return;
   }
 
+  const windowControl = term ? buildMessageWindowControl(renderPlan) : null;
+  if (windowControl) {
+    messagesEl.appendChild(windowControl);
+  }
+
   if (term) {
-    sessionSearchCount.textContent = currentSessionSearch.loading ? "Searching..." : "Rendering...";
+    sessionSearchCount.textContent = currentSessionSearch.loading ? "Searching..." : "Rendering…";
   } else {
-    sessionSearchCount.textContent = "";
+    if (hasHiddenMessages) {
+      sessionSearchCount.textContent = `Rendered ${renderedCount.toLocaleString()} of ${currentVisibleMessageCount.toLocaleString()} messages`;
+    } else {
+      sessionSearchCount.textContent = "";
+    }
   }
 
   let offset = 0;
@@ -1732,6 +1874,7 @@ function resetSessionPane() {
   currentSessionSearch = createEmptySessionSearchState();
   currentSession = null;
   currentMessages = [];
+  resetMessageRenderCount();
   expandedMessageIndexes = new Set();
   sessionSearchInput.value = "";
   sessionSearchCount.textContent = "";
@@ -1847,16 +1990,18 @@ function scheduleSessionSearchRender() {
   }, SESSION_SEARCH_DEBOUNCE_MS);
 }
 
-async function refreshSessionSearch() {
+async function refreshSessionSearch({ resetRenderCount = true } = {}) {
   const term = sessionSearchInput.value.trim();
   const fetchSeq = (sessionSearchFetchSeq += 1);
 
   if (!term || !currentSession) {
     currentSessionSearch = createEmptySessionSearchState();
+    if (resetRenderCount) resetMessageRenderCount();
     renderMessages(currentMessages);
     return;
   }
 
+  if (resetRenderCount) resetMessageRenderCount();
   currentSessionSearch = {
     query: term,
     matches: new Map(),
@@ -1868,7 +2013,11 @@ async function refreshSessionSearch() {
   renderMessages(currentMessages);
 
   try {
-    const res = await fetch(`${apiBase()}/session/${encodeURIComponent(currentSession.id)}/search?q=${encodeURIComponent(term)}`);
+    const params = new URLSearchParams({
+      q: term,
+      limit: String(getSafeMessageRenderCount()),
+    });
+    const res = await fetch(`${apiBase()}/session/${encodeURIComponent(currentSession.id)}/search?${params.toString()}`);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
@@ -2233,6 +2382,7 @@ clearSessionSearch.addEventListener("click", () => {
   sessionSearchInput.value = "";
   sessionSearchFetchSeq += 1;
   currentSessionSearch = createEmptySessionSearchState();
+  resetMessageRenderCount();
   renderMessages(currentMessages);
 });
 
@@ -2301,7 +2451,16 @@ messagesEl.addEventListener("click", async (event) => {
     }
     return;
   }
-
+  const windowAction = target ? target.closest("[data-message-window-action]") : null;
+  if (windowAction) {
+    currentMessageRenderLimit += SESSION_MESSAGE_LOAD_STEP;
+    if (sessionSearchInput.value.trim()) {
+      refreshSessionSearch({ resetRenderCount: false });
+    } else {
+      renderMessages(currentMessages);
+    }
+    return;
+  }
   const toggle = target ? target.closest("[data-message-toggle]") : null;
   if (!toggle) return;
   const index = Number(toggle.dataset.messageToggle);
@@ -2405,6 +2564,7 @@ applyRoleFiltersFromStorage(roleInputs);
 roleInputs.forEach((input) => {
   input.addEventListener("change", () => {
     persistRoleFilters(roleInputs);
+    resetMessageRenderCount();
     renderMessages(currentMessages);
   });
 });

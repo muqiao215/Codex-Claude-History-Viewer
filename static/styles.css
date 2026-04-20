@@ -593,6 +593,24 @@ body.is-resizing {
   font-size: 12px;
 }
 
+.message-window-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+}
+
+.message-window-note {
+  font-size: 13px;
+  color: var(--muted);
+}
+
 .session-info {
   display: flex;
   flex-direction: column;
