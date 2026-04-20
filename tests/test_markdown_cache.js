@@ -219,9 +219,14 @@ globalThis.__testApi = {
       }
     });
   },
+  flushPendingLazyMessageBodiesForRoot,
+  getBrowseVirtualRefreshScrollTop,
   setCurrentSession(value) { currentSession = value; },
   setCurrentSystem(value) { currentSystem = value; },
   setCurrentSource(value) { currentSource = value; },
+  setBrowseVirtualRenderScrollTop(value) {
+    currentBrowseVirtualRenderScrollTop = value;
+  },
   setCurrentSessionSearchData(query, entries) {
     currentSessionSearch = {
       query,
@@ -243,6 +248,7 @@ globalThis.__testApi = {
     };
   },
   buildMessageRenderPlan,
+  buildVirtualWindow,
 };
 `;
 
@@ -268,6 +274,7 @@ globalThis.__testApi = {
       callback();
       return 1;
     },
+    cancelAnimationFrame() {},
     setTimeout() {
       return 1;
     },
@@ -399,6 +406,58 @@ function testMessageBodiesRenderLazilyUntilVisible() {
   assert.deepEqual(renderedInputs, ["lazy body"]);
 }
 
+function testMountedVirtualWindowBodiesFlushWithoutIntersectionObserver() {
+  const { api } = loadApp();
+  const renderedInputs = [];
+  api.setCurrentSystem("linux");
+  api.setCurrentSource("codex");
+  api.setCurrentSession({ id: "session-virtual-lazy" });
+  api.setExpandedMessageIndexes([]);
+  api.setCurrentSessionSearchData("", []);
+  api.setRenderMarkdown((text) => {
+    renderedInputs.push(text);
+    return `rendered:${text}`;
+  });
+
+  const root = new FakeElement("div");
+  const first = api.buildMessageElement({
+    message_index: 41,
+    role: "assistant",
+    kind: "message",
+    text: "mounted virtual row",
+  }, 41, "");
+  const second = api.buildMessageElement({
+    message_index: 42,
+    role: "user",
+    kind: "message",
+    text: "second mounted row",
+  }, 42, "");
+  root.appendChild(first.wrapper);
+  root.appendChild(second.wrapper);
+
+  const firstBody = first.wrapper.children[1];
+  const secondBody = second.wrapper.children[1];
+  assert.equal(firstBody.textContent, "Rendering message...");
+  assert.equal(secondBody.textContent, "Rendering message...");
+  assert.deepEqual(renderedInputs, []);
+
+  const flushed = api.flushPendingLazyMessageBodiesForRoot(root);
+
+  assert.equal(flushed, 2);
+  assert.equal(firstBody.innerHTML, "rendered:mounted virtual row");
+  assert.equal(secondBody.innerHTML, "rendered:second mounted row");
+  assert.deepEqual(renderedInputs, ["mounted virtual row", "second mounted row"]);
+}
+
+function testBrowseVirtualRefreshUsesInFlightRestoreScrollTop() {
+  const { api } = loadApp();
+  api.setBrowseVirtualRenderScrollTop(20_000);
+  assert.equal(api.getBrowseVirtualRefreshScrollTop(0), 20_000);
+  assert.equal(api.getBrowseVirtualRefreshScrollTop(75), 20_000);
+  api.setBrowseVirtualRenderScrollTop(null);
+  assert.equal(api.getBrowseVirtualRefreshScrollTop(75), 75);
+}
+
 function testLinuxResumeCommandsUseShellFriendlyVariants() {
   const { api } = loadApp();
   const labels = api.getResumeCommandLabels("linux");
@@ -482,11 +541,44 @@ function testSearchRenderPlanOnlyReturnsMatchedWindow() {
   assert.equal(plan.items.at(-1).index, 199);
 }
 
+function testVirtualWindowKeepsBoundedVisibleRangeWithSpacers() {
+  const { api } = loadApp();
+  const heights = Array.from({ length: 1000 }, () => 100);
+  const plan = api.buildVirtualWindow(heights, 50_000, 600, 300);
+
+  assert.equal(plan.totalHeight, 100_000);
+  assert.ok(plan.start > 0, "expected a non-zero start range for deep scroll");
+  assert.ok(plan.end < heights.length, "expected range to stop before the full list");
+  assert.ok(plan.end - plan.start <= 16, "expected bounded DOM range with overscan");
+  assert.ok(plan.topSpacer > 0, "expected top spacer to preserve scroll height");
+  assert.ok(plan.bottomSpacer > 0, "expected bottom spacer to preserve scroll height");
+  assert.equal(
+    plan.topSpacer + plan.bottomSpacer + (plan.end - plan.start) * 100,
+    plan.totalHeight,
+  );
+}
+
+function testVirtualWindowUsesMeasuredVariableHeights() {
+  const { api } = loadApp();
+  const heights = [100, 100, 500, 100, 100, 100];
+  const plan = api.buildVirtualWindow(heights, 250, 120, 0);
+
+  assert.equal(plan.totalHeight, 1000);
+  assert.equal(plan.start, 2);
+  assert.equal(plan.end, 3);
+  assert.equal(plan.topSpacer, 200);
+  assert.equal(plan.bottomSpacer, 300);
+}
+
 testPersistentCacheReusesRenderedHtmlAcrossMessageObjects();
 testPreviewAndFullModesUseDistinctPersistentEntries();
 testSearchHitUsesExcerptInsteadOfAutoExpandingFullLongMessage();
 testMessageBodiesRenderLazilyUntilVisible();
+testMountedVirtualWindowBodiesFlushWithoutIntersectionObserver();
+testBrowseVirtualRefreshUsesInFlightRestoreScrollTop();
 testLinuxResumeCommandsUseShellFriendlyVariants();
 testClaudeResumeCommandsAppendDangerousSkipPermissions();
 testBrowseRenderPlanShowsLatestWindowOnly();
 testSearchRenderPlanOnlyReturnsMatchedWindow();
+testVirtualWindowKeepsBoundedVisibleRangeWithSpacers();
+testVirtualWindowUsesMeasuredVariableHeights();

@@ -88,6 +88,10 @@ const MESSAGE_PREVIEW_CHARS = 4_000;
 const MESSAGE_LAZY_RENDER_ROOT_MARGIN = "800px 0px";
 const INITIAL_SESSION_MESSAGE_LIMIT = MESSAGE_RENDER_PAGE_SIZE;
 const SESSION_MESSAGE_LOAD_STEP = MESSAGE_RENDER_PAGE_SIZE;
+const MESSAGE_VIRTUAL_OVERSCAN_PX = 1200;
+const MESSAGE_VIRTUAL_ESTIMATED_HEIGHT = 260;
+const MESSAGE_VIRTUAL_MIN_HEIGHT = 96;
+const MESSAGE_VIRTUAL_ROW_GAP = 12;
 const SESSION_LIST_PAGE_LIMIT = 50;
 const PROJECT_LIST_PAGE_LIMIT = 40;
 const MARKDOWN_CACHE_INDEX_KEY = "historyViewer.markdownCache.v1.index";
@@ -101,6 +105,10 @@ let messageBodyObserver = null;
 const pendingLazyMessageBodies = new Map();
 let currentMessageRenderLimit = INITIAL_SESSION_MESSAGE_LIMIT;
 let currentVisibleMessageCount = 0;
+let measuredMessageHeights = new Map();
+let browseVirtualRefreshFrame = null;
+let pendingBrowseVirtualScrollTop = null;
+let currentBrowseVirtualRenderScrollTop = null;
 
 function createEmptySessionSearchState(query = "") {
   return {
@@ -136,6 +144,174 @@ function growMessageRenderLimit() {
   return true;
 }
 
+function clearMeasuredMessageHeights() {
+  measuredMessageHeights = new Map();
+}
+
+function resetBrowseVirtualRefresh({ cancel = true } = {}) {
+  if (
+    cancel
+    && browseVirtualRefreshFrame !== null
+    && typeof cancelAnimationFrame === "function"
+  ) {
+    cancelAnimationFrame(browseVirtualRefreshFrame);
+  }
+  browseVirtualRefreshFrame = null;
+  pendingBrowseVirtualScrollTop = null;
+}
+
+function getBrowseVirtualRefreshScrollTop(scrollTop = null) {
+  if (Number.isFinite(currentBrowseVirtualRenderScrollTop)) {
+    return currentBrowseVirtualRenderScrollTop;
+  }
+  if (Number.isFinite(scrollTop)) {
+    return Math.max(0, scrollTop);
+  }
+  return Math.max(0, messagesEl.scrollTop || 0);
+}
+
+function setMessagesVirtualized(active) {
+  messagesEl.classList.toggle("virtualized", !!active);
+}
+
+function getEstimatedMessageHeight(msg, index) {
+  const cached = getMessageRenderData(msg);
+  const expanded = !cached.collapsible || expandedMessageIndexes.has(index);
+  const sourceText = String(msg?.text || "");
+  const renderedChars = expanded
+    ? Math.min(sourceText.length, MESSAGE_PREVIEW_CHARS * 3)
+    : Math.min(sourceText.length, MESSAGE_PREVIEW_CHARS);
+  const renderedText = sourceText.slice(0, renderedChars);
+  const wrappedLines = Math.ceil(renderedText.length / 100);
+  const explicitLines = renderedText ? renderedText.split("\n").length : 1;
+  const structuralLines = Math.max(wrappedLines, explicitLines);
+  const controlsHeight = cached.collapsible ? 48 : 0;
+  const estimated = 92 + controlsHeight + Math.min(structuralLines, expanded ? 52 : 22) * 18;
+  return Math.max(MESSAGE_VIRTUAL_MIN_HEIGHT, Math.min(estimated, expanded ? 1400 : 700));
+}
+
+function getMessageRowHeight(msg, index) {
+  const measured = measuredMessageHeights.get(index);
+  if (Number.isFinite(measured) && measured > 0) return measured;
+  return getEstimatedMessageHeight(msg, index) + MESSAGE_VIRTUAL_ROW_GAP;
+}
+
+function buildVirtualWindow(heights, scrollTop, viewportHeight, overscanPx = MESSAGE_VIRTUAL_OVERSCAN_PX) {
+  const normalizedHeights = Array.isArray(heights)
+    ? heights.map((value) => Math.max(MESSAGE_VIRTUAL_MIN_HEIGHT, Number(value) || MESSAGE_VIRTUAL_ESTIMATED_HEIGHT))
+    : [];
+  if (!normalizedHeights.length) {
+    return {
+      start: 0,
+      end: 0,
+      topSpacer: 0,
+      bottomSpacer: 0,
+      totalHeight: 0,
+    };
+  }
+
+  const safeScrollTop = Math.max(0, Number(scrollTop) || 0);
+  const safeViewportHeight = Math.max(MESSAGE_VIRTUAL_ESTIMATED_HEIGHT, Number(viewportHeight) || 0);
+  const startOffset = Math.max(0, safeScrollTop - overscanPx);
+  const endOffset = safeScrollTop + safeViewportHeight + overscanPx;
+
+  let totalHeight = 0;
+  let start = 0;
+  let end = 0;
+  let topSpacer = 0;
+  let visibleHeight = 0;
+  let foundStart = false;
+
+  normalizedHeights.forEach((height, index) => {
+    const rowTop = totalHeight;
+    const rowBottom = rowTop + height;
+
+    if (!foundStart && rowBottom >= startOffset) {
+      foundStart = true;
+      start = index;
+      topSpacer = rowTop;
+    }
+
+    if (foundStart && rowTop <= endOffset) {
+      end = index + 1;
+      visibleHeight += height;
+    }
+
+    totalHeight = rowBottom;
+  });
+
+  if (!foundStart) {
+    start = Math.max(0, normalizedHeights.length - 1);
+    end = normalizedHeights.length;
+    topSpacer = Math.max(0, totalHeight - normalizedHeights[start]);
+    visibleHeight = normalizedHeights[start];
+  } else if (end <= start) {
+    end = Math.min(normalizedHeights.length, start + 1);
+    visibleHeight = normalizedHeights[start];
+  }
+
+  return {
+    start,
+    end,
+    topSpacer,
+    bottomSpacer: Math.max(0, totalHeight - topSpacer - visibleHeight),
+    totalHeight,
+  };
+}
+
+function buildBrowseVirtualRenderState(items, scrollTop, viewportHeight) {
+  const heights = items.map(({ msg, index }) => getMessageRowHeight(msg, index));
+  const windowState = buildVirtualWindow(heights, scrollTop, viewportHeight);
+  return {
+    ...windowState,
+    items: items.slice(windowState.start, windowState.end),
+  };
+}
+
+function recordMeasuredMessageHeight(wrapper) {
+  if (!(wrapper instanceof Element)) return false;
+  const index = Number(wrapper.dataset?.messageIndex);
+  if (!Number.isInteger(index)) return false;
+  if (typeof wrapper.getBoundingClientRect !== "function") return false;
+  const rect = wrapper.getBoundingClientRect();
+  const measured = Math.max(
+    MESSAGE_VIRTUAL_MIN_HEIGHT,
+    Math.ceil((Number(rect?.height) || 0) + MESSAGE_VIRTUAL_ROW_GAP),
+  );
+  if (!Number.isFinite(measured) || measured <= 0) return false;
+  const previous = measuredMessageHeights.get(index);
+  if (Number.isFinite(previous) && Math.abs(previous - measured) < 3) {
+    return false;
+  }
+  measuredMessageHeights.set(index, measured);
+  return true;
+}
+
+function scheduleBrowseVirtualRefresh(scrollTop = messagesEl.scrollTop) {
+  if (sessionSearchInput.value.trim()) return;
+  pendingBrowseVirtualScrollTop = getBrowseVirtualRefreshScrollTop(scrollTop);
+  if (browseVirtualRefreshFrame !== null) return;
+  browseVirtualRefreshFrame = requestAnimationFrame(() => {
+    const nextScrollTop = pendingBrowseVirtualScrollTop;
+    resetBrowseVirtualRefresh({ cancel: false });
+    renderMessages(currentMessages, { restoreScrollTop: nextScrollTop });
+  });
+}
+
+function scheduleVirtualMeasurement(windowEl, renderSeq) {
+  requestAnimationFrame(() => {
+    if (renderSeq !== messageRenderSeq) return;
+    if (!(windowEl instanceof Element)) return;
+    let changed = false;
+    Array.from(windowEl.children || []).forEach((child) => {
+      changed = recordMeasuredMessageHeight(child) || changed;
+    });
+    if (changed) {
+      scheduleBrowseVirtualRefresh();
+    }
+  });
+}
+
 function disconnectMessageBodyObserver() {
   pendingLazyMessageBodies.clear();
   if (!messageBodyObserver) return;
@@ -143,13 +319,19 @@ function disconnectMessageBodyObserver() {
   messageBodyObserver = null;
 }
 
-function flushLazyMessageBody(body) {
+function takePendingLazyMessageBody(body) {
   const render = pendingLazyMessageBodies.get(body);
-  if (!render) return false;
+  if (!render) return null;
   pendingLazyMessageBodies.delete(body);
   if (messageBodyObserver) {
     messageBodyObserver.unobserve(body);
   }
+  return render;
+}
+
+function flushLazyMessageBody(body) {
+  const render = takePendingLazyMessageBody(body);
+  if (!render) return false;
   render();
   return true;
 }
@@ -181,6 +363,28 @@ function queueLazyMessageBody(body, render) {
   }
   pendingLazyMessageBodies.set(body, render);
   observer.observe(body);
+}
+
+function collectPendingLazyMessageBodies(root, results = []) {
+  if (!root || !root.children) return results;
+  Array.from(root.children).forEach((child) => {
+    if (pendingLazyMessageBodies.has(child)) {
+      results.push(child);
+    }
+    collectPendingLazyMessageBodies(child, results);
+  });
+  return results;
+}
+
+function flushPendingLazyMessageBodiesForRoot(root) {
+  const bodies = collectPendingLazyMessageBodies(root, []);
+  const renders = bodies.map((body) => ({ body, render: takePendingLazyMessageBody(body) }));
+  renders.forEach(({ render }) => {
+    if (typeof render === "function") {
+      render();
+    }
+  });
+  return bodies.length;
 }
 
 const UI_STORAGE_KEYS = {
@@ -1394,6 +1598,7 @@ function cancelPendingMessageRender() {
     sessionSearchTimer = null;
   }
   disconnectMessageBodyObserver();
+  currentBrowseVirtualRenderScrollTop = null;
   messageRenderSeq += 1;
 }
 
@@ -1605,6 +1810,7 @@ function buildMessageElement(msg, index, term) {
 
   const wrapper = document.createElement("div");
   wrapper.className = `msg ${roleClass}`;
+  wrapper.dataset.messageIndex = String(index);
   if (msg.kind === "agent_reasoning" || msg.kind === "reasoning_summary") {
     wrapper.classList.add("thinking");
   }
@@ -1646,6 +1852,9 @@ function buildMessageElement(msg, index, term) {
     queueLazyMessageBody(body, () => {
       if ("isConnected" in body && !body.isConnected) return;
       renderMessageBodyInto(body, msg, { expanded, searchMatch: null, term: "" });
+      if (recordMeasuredMessageHeight(wrapper)) {
+        scheduleBrowseVirtualRefresh();
+      }
     });
   } else {
     bodyRender = renderMessageBodyInto(body, msg, { expanded, searchMatch, term });
@@ -1697,6 +1906,9 @@ function buildMessageElement(msg, index, term) {
 function renderMessages(messages, { restoreScrollTop = null } = {}) {
   cancelPendingMessageRender();
   const renderSeq = messageRenderSeq;
+  const fallbackScrollTop = Number.isFinite(restoreScrollTop)
+    ? restoreScrollTop
+    : Math.max(0, messagesEl.scrollTop || 0);
   messagesEl.innerHTML = "";
   const roleFilters = getRoleFilters();
   const term = sessionSearchInput.value.trim();
@@ -1724,6 +1936,8 @@ function renderMessages(messages, { restoreScrollTop = null } = {}) {
   const activeMessages = term ? renderPlan.items : visibleMessages.slice(0, currentMessageRenderLimit);
   const renderedCount = activeMessages.length;
   const hasHiddenMessages = !term && renderedCount < currentVisibleMessageCount;
+
+  setMessagesVirtualized(!term && renderedCount > 0);
 
   if (renderedCount === 0) {
     const empty = document.createElement("div");
@@ -1776,6 +1990,70 @@ function renderMessages(messages, { restoreScrollTop = null } = {}) {
     }
   }
 
+  if (!term) {
+    resetBrowseVirtualRefresh();
+    currentBrowseVirtualRenderScrollTop = fallbackScrollTop;
+    const viewportHeight = Math.max(messagesEl.clientHeight || 0, MESSAGE_VIRTUAL_ESTIMATED_HEIGHT * 2);
+    const virtualState = buildBrowseVirtualRenderState(activeMessages, fallbackScrollTop, viewportHeight);
+    const topSpacer = document.createElement("div");
+    topSpacer.className = "message-virtual-spacer";
+    topSpacer.style.height = `${virtualState.topSpacer}px`;
+    messagesEl.appendChild(topSpacer);
+
+    const windowEl = document.createElement("div");
+    windowEl.className = "message-virtual-window";
+    messagesEl.appendChild(windowEl);
+
+    const bottomSpacer = document.createElement("div");
+    bottomSpacer.className = "message-virtual-spacer";
+    bottomSpacer.style.height = `${virtualState.bottomSpacer}px`;
+    messagesEl.appendChild(bottomSpacer);
+
+    let offset = 0;
+    const renderBatch = () => {
+      if (renderSeq !== messageRenderSeq) return;
+
+      const fragment = document.createDocumentFragment();
+      const batchEnd = Math.min(offset + MESSAGE_RENDER_BATCH_SIZE, virtualState.items.length);
+      for (; offset < batchEnd; offset += 1) {
+        const { msg, index } = virtualState.items[offset];
+        const rendered = buildMessageElement(msg, index, "");
+        fragment.appendChild(rendered.wrapper);
+      }
+      windowEl.appendChild(fragment);
+
+      if (offset < virtualState.items.length) {
+        requestAnimationFrame(renderBatch);
+        return;
+      }
+
+      sessionSearchCount.textContent = hasHiddenMessages
+        ? `Rendered ${renderedCount.toLocaleString()} of ${currentVisibleMessageCount.toLocaleString()} messages`
+        : "";
+
+      if (hasHiddenMessages) {
+        const progress = document.createElement("div");
+        progress.className = "messages-progress muted";
+        progress.innerHTML = `
+          <span>Showing ${renderedCount.toLocaleString()} of ${currentVisibleMessageCount.toLocaleString()} messages.</span>
+          <button type="button" class="btn small" data-load-more-messages="true">Load more messages</button>
+        `;
+        messagesEl.appendChild(progress);
+      }
+
+      flushPendingLazyMessageBodiesForRoot(windowEl);
+      updateMatchNavState("");
+      messagesEl.scrollTop = fallbackScrollTop;
+      currentBrowseVirtualRenderScrollTop = null;
+      scheduleVirtualMeasurement(windowEl, renderSeq);
+    };
+
+    renderBatch();
+    return;
+  }
+
+  currentBrowseVirtualRenderScrollTop = null;
+
   let offset = 0;
   const renderBatch = () => {
     if (renderSeq !== messageRenderSeq) return;
@@ -1822,9 +2100,7 @@ function renderMessages(messages, { restoreScrollTop = null } = {}) {
     }
 
     updateMatchNavState(term);
-    if (Number.isFinite(restoreScrollTop)) {
-      messagesEl.scrollTop = restoreScrollTop;
-    }
+    messagesEl.scrollTop = fallbackScrollTop;
   };
 
   renderBatch();
@@ -1869,6 +2145,9 @@ function setActiveMarkIndex(index, { scroll }) {
 
 function resetSessionPane() {
   cancelPendingMessageRender();
+  resetBrowseVirtualRefresh();
+  clearMeasuredMessageHeights();
+  setMessagesVirtualized(false);
   resetMessageRenderLimit();
   sessionSearchFetchSeq += 1;
   currentSessionSearch = createEmptySessionSearchState();
@@ -1958,7 +2237,9 @@ function setResultsHeader() {
 
 function renderStatusMessage(text, { kind } = { kind: "muted" }) {
   cancelPendingMessageRender();
+  setMessagesVirtualized(false);
   messagesEl.innerHTML = "";
+  messagesEl.scrollTop = 0;
   sessionSearchCount.textContent = "";
   const div = document.createElement("div");
   div.className = kind === "error" ? "msg other error" : "muted";
@@ -2159,6 +2440,8 @@ async function fetchSessions({ append = false } = {}) {
 async function fetchSession(sessionId) {
   const seq = (sessionFetchSeq += 1);
   resetMessageRenderLimit();
+  resetBrowseVirtualRefresh();
+  clearMeasuredMessageHeights();
   expandedMessageIndexes = new Set();
   renderStatusMessage("Loading…");
   try {
@@ -2176,6 +2459,7 @@ async function fetchSession(sessionId) {
       full_text_loaded: !msg?.is_truncated,
     }));
     expandedMessageIndexes = new Set();
+    messagesEl.scrollTop = 0;
     renderSessionHeader(currentSession);
     renderMessages(currentMessages);
   } catch (err) {
@@ -2431,14 +2715,13 @@ copyResumeCmdWslBtn.addEventListener("click", () => {
 
 messagesEl.addEventListener("scroll", () => {
   if (sessionSearchInput.value.trim()) return;
-  if (currentMessageRenderLimit >= currentVisibleMessageCount) return;
-  const distanceToBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
-  if (distanceToBottom > 900) return;
-
   const scrollTop = messagesEl.scrollTop;
-  if (growMessageRenderLimit()) {
+  const distanceToBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+  if (currentMessageRenderLimit < currentVisibleMessageCount && distanceToBottom <= 900 && growMessageRenderLimit()) {
     renderMessages(currentMessages, { restoreScrollTop: scrollTop });
+    return;
   }
+  scheduleBrowseVirtualRefresh(scrollTop);
 });
 
 messagesEl.addEventListener("click", async (event) => {
@@ -2485,7 +2768,7 @@ messagesEl.addEventListener("click", async (event) => {
   } else {
     expandedMessageIndexes.add(index);
   }
-  renderMessages(currentMessages);
+  renderMessages(currentMessages, { restoreScrollTop: messagesEl.scrollTop });
 });
 
 pinSessionBtn.addEventListener("click", async () => {
