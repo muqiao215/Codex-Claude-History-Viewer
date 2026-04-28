@@ -702,6 +702,13 @@ body.is-resizing {
   background: var(--surface-selected);
 }
 
+.pinned-divider {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+}
+
 .pin-icon {
   margin-right: 4px;
   font-size: 12px;

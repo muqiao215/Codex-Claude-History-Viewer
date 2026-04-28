@@ -1403,37 +1403,44 @@ class Indexer:
 
         sort_key = str(sort or "start").strip().lower()
         if sort_key in ("last", "end", "updated", "update"):
-            order_clause = " ORDER BY COALESCE(pinned,0) DESC, end_ts_ms DESC, start_ts_ms DESC"
+            order_clause = " ORDER BY end_ts_ms DESC, start_ts_ms DESC"
         else:
-            order_clause = " ORDER BY COALESCE(pinned,0) DESC, start_ts_ms DESC, end_ts_ms DESC"
+            order_clause = " ORDER BY start_ts_ms DESC, end_ts_ms DESC"
 
-        sql = (
-            "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned "
-            "FROM sessions WHERE 1=1"
-        )
+        where_sql = " WHERE 1=1"
         args = []
         if start_ms is not None:
-            sql += " AND start_ts_ms >= ?"
+            where_sql += " AND start_ts_ms >= ?"
             args.append(int(start_ms))
         if end_ms is not None:
-            sql += " AND start_ts_ms <= ?"
+            where_sql += " AND start_ts_ms <= ?"
             args.append(int(end_ms))
         if cwd:
-            sql += " AND cwd = ?"
+            where_sql += " AND cwd = ?"
             args.append(cwd)
         for term in terms:
-            sql += " AND (search_blob LIKE ? OR title LIKE ? OR cwd LIKE ?)"
+            where_sql += " AND (search_blob LIKE ? OR title LIKE ? OR cwd LIKE ?)"
             like = f"%{term}%"
             args.extend([like, like, like])
-        sql += order_clause + " LIMIT ? OFFSET ?"
-        args.extend([clean_limit + 1, clean_offset])
 
+        select_sql = "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned FROM sessions"
+        pinned_rows = []
         with self.lock:
-            rows = self.conn.execute(sql, args).fetchall()
+            if clean_offset == 0:
+                pinned_rows = self.conn.execute(
+                    f"{select_sql}{where_sql} AND COALESCE(pinned,0) = 1{order_clause}",
+                    args,
+                ).fetchall()
 
-        items = [dict(row) for row in rows[:clean_limit]]
+            rows = self.conn.execute(
+                f"{select_sql}{where_sql} AND COALESCE(pinned,0) = 0{order_clause} LIMIT ? OFFSET ?",
+                [*args, clean_limit + 1, clean_offset],
+            ).fetchall()
+
+        unpinned_items = [dict(row) for row in rows[:clean_limit]]
+        items = [dict(row) for row in pinned_rows] + unpinned_items
         has_more = len(rows) > clean_limit
-        next_offset = clean_offset + len(items) if has_more else None
+        next_offset = clean_offset + len(unpinned_items) if has_more else None
         return {
             "items": items,
             "limit": clean_limit,

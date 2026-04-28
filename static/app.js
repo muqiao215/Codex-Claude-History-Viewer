@@ -1553,18 +1553,10 @@ function updateListFooter() {
 
 function renderSessions(sessions) {
   const sorted = sortSessionsForSidebar(sessions);
+  const pinned = sorted.filter((session) => !!session.pinned);
+  const unpinned = sorted.filter((session) => !session.pinned);
   sessionListEl.innerHTML = "";
-  let lastDate = "";
-  sorted.forEach((session) => {
-    const date = formatDate(sessionSortKeyMs(session));
-    if (date && date !== lastDate) {
-      const divider = document.createElement("div");
-      divider.className = "date-divider";
-      divider.textContent = date;
-      sessionListEl.appendChild(divider);
-      lastDate = date;
-    }
-
+  const appendSessionItem = (session) => {
     const item = document.createElement("div");
     item.className = "session-item";
     if (session.pinned) item.classList.add("pinned");
@@ -1576,6 +1568,27 @@ function renderSessions(sessions) {
       <div class="session-meta">${escapeHtml(formatSessionMeta(session))}</div>
     `;
     sessionListEl.appendChild(item);
+  };
+
+  if (pinned.length > 0) {
+    const divider = document.createElement("div");
+    divider.className = "date-divider pinned-divider";
+    divider.textContent = "Pinned";
+    sessionListEl.appendChild(divider);
+    pinned.forEach(appendSessionItem);
+  }
+
+  let lastDate = "";
+  unpinned.forEach((session) => {
+    const date = formatDate(sessionSortKeyMs(session));
+    if (date && date !== lastDate) {
+      const divider = document.createElement("div");
+      divider.className = "date-divider";
+      divider.textContent = date;
+      sessionListEl.appendChild(divider);
+      lastDate = date;
+    }
+    appendSessionItem(session);
   });
 }
 

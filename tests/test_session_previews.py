@@ -214,6 +214,29 @@ class ListPaginationTests(unittest.TestCase):
         self.assertTrue(page["has_more"])
         self.assertEqual(page["next_offset"], 4)
 
+    def test_first_page_includes_all_pinned_without_counting_toward_page_limit(self):
+        with self.indexer.lock:
+            self.indexer.conn.execute("UPDATE sessions SET pinned = 1 WHERE id IN (?, ?, ?)", (
+                "session-0",
+                "session-2",
+                "session-4",
+            ))
+            self.indexer.conn.commit()
+
+        first = self.indexer.list_sessions_page(limit=1, offset=0, sort="start")
+        second = self.indexer.list_sessions_page(limit=1, offset=1, sort="start")
+
+        self.assertEqual([item["id"] for item in first["items"]], [
+            "session-4",
+            "session-2",
+            "session-0",
+            "session-3",
+        ])
+        self.assertTrue(first["has_more"])
+        self.assertEqual(first["next_offset"], 1)
+        self.assertEqual([item["id"] for item in second["items"]], ["session-1"])
+        self.assertFalse(second["has_more"])
+
     def test_list_projects_page_groups_and_paginates(self):
         page = self.indexer.list_projects_page(limit=1, offset=0)
 
