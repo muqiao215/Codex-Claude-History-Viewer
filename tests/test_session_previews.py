@@ -2,6 +2,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+import os
 import sqlite3
 
 
@@ -220,6 +221,60 @@ class ListPaginationTests(unittest.TestCase):
         self.assertEqual(page["items"][0]["project"], "project-0")
         self.assertTrue(page["has_more"])
         self.assertEqual(page["next_offset"], 1)
+
+
+class PinSessionTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name)
+        self.sessions_dir = root / "sessions"
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir = root / "data"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.session_file = self.sessions_dir / "session-pin.jsonl"
+        self.session_file.write_text("{}\n", encoding="utf-8")
+        self.indexer = app.Indexer(
+            sessions_dir=self.sessions_dir,
+            data_dir=self.data_dir,
+            source="codex",
+            db_filename="index.sqlite",
+            parse_file_fn=self._parse_session,
+            parser_version=1,
+            recall_db_path=None,
+        )
+        self.addCleanup(self.temp_dir.cleanup)
+        self.addCleanup(self.indexer.conn.close)
+
+    def _parse_session(self, path):
+        return {
+            "id": "session-pin",
+            "file_path": str(path),
+            "start_ts_ms": 1,
+            "end_ts_ms": 2,
+            "cwd": str(self.sessions_dir),
+            "title": "Pinned session",
+            "message_count": 1,
+            "search_blob": "Pinned session",
+            "messages": [
+                {
+                    "ts_ms": 1,
+                    "role": "user",
+                    "kind": "message",
+                    "text": "hello",
+                }
+            ],
+        }
+
+    def test_pin_survives_reindex_after_file_change(self):
+        self.indexer.scan_sessions()
+        self.assertTrue(self.indexer.pin_session("session-pin", True))
+
+        next_mtime = self.session_file.stat().st_mtime + 10
+        os.utime(self.session_file, (next_mtime, next_mtime))
+        self.indexer.scan_sessions()
+
+        session = self.indexer.get_session("session-pin")["session"]
+        self.assertEqual(session["pinned"], 1)
 
 
 class HermesStateIndexerTests(unittest.TestCase):

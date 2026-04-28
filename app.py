@@ -1238,7 +1238,7 @@ class Indexer:
         session_files = [p for p in self.sessions_dir.rglob("*.jsonl") if self._file_filter_fn(p)]
         with self.lock:
             existing_rows = self.conn.execute(
-                "SELECT id, file_path, mtime, parser_version, title FROM sessions"
+                "SELECT id, file_path, mtime, parser_version, title, pinned FROM sessions"
             ).fetchall()
         existing_by_path = {str(row["file_path"]): row for row in existing_rows}
 
@@ -1289,11 +1289,12 @@ class Indexer:
                     self.conn.execute("DELETE FROM sessions WHERE id = ?", (row["id"],))
 
                 self.conn.execute("DELETE FROM messages WHERE session_id = ?", (session["id"],))
+                pinned = int(row["pinned"] or 0) if row else 0
                 self.conn.execute(
                     """
                     INSERT OR REPLACE INTO sessions
-                    (id, file_path, start_ts_ms, end_ts_ms, cwd, title, message_count, mtime, search_blob, parser_version)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, file_path, start_ts_ms, end_ts_ms, cwd, title, message_count, mtime, search_blob, parser_version, pinned)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         session["id"],
@@ -1306,6 +1307,7 @@ class Indexer:
                         mtime,
                         session["search_blob"],
                         self.parser_version,
+                        pinned,
                     ),
                 )
 

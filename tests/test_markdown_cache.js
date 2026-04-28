@@ -201,7 +201,7 @@ class FakeIntersectionObserver {
 
 FakeIntersectionObserver.instances = [];
 
-function loadApp() {
+function loadApp({ fetchImpl, alertImpl } = {}) {
   const repoDir = path.resolve(__dirname, "..");
   const sourcePath = path.join(repoDir, "static", "app.js");
   const source = fs.readFileSync(sourcePath, "utf8") + `
@@ -222,6 +222,7 @@ globalThis.__testApi = {
   flushPendingLazyMessageBodiesForRoot,
   getBrowseVirtualRefreshScrollTop,
   setCurrentSession(value) { currentSession = value; },
+  getCurrentSession() { return currentSession; },
   setCurrentSystem(value) { currentSystem = value; },
   setCurrentSource(value) { currentSource = value; },
   setBrowseVirtualRenderScrollTop(value) {
@@ -249,6 +250,7 @@ globalThis.__testApi = {
   },
   buildMessageRenderPlan,
   buildVirtualWindow,
+  handlePinSessionClick,
 };
 `;
 
@@ -266,10 +268,10 @@ globalThis.__testApi = {
     window: {
       addEventListener() {},
     },
-    fetch: async () => ({
+    fetch: fetchImpl || (async () => ({
       ok: true,
       json: async () => ({ items: [], has_more: false, next_offset: 0, matches: [] }),
-    }),
+    })),
     requestAnimationFrame(callback) {
       callback();
       return 1;
@@ -279,7 +281,7 @@ globalThis.__testApi = {
       return 1;
     },
     clearTimeout() {},
-    alert() {},
+    alert: alertImpl || (() => {}),
     URLSearchParams,
     Element: FakeElement,
     NodeFilter: { SHOW_TEXT: 4 },
@@ -570,6 +572,26 @@ function testVirtualWindowUsesMeasuredVariableHeights() {
   assert.equal(plan.bottomSpacer, 300);
 }
 
+async function testPinFailureDoesNotMutateCurrentSession() {
+  const alerts = [];
+  const { api } = loadApp({
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ ok: false, error: "unsupported" }),
+    }),
+    alertImpl: (message) => alerts.push(message),
+  });
+  api.setCurrentSystem("windows");
+  api.setCurrentSource("codex");
+  api.setCurrentSession({ id: "session-pin", pinned: 0 });
+
+  await api.handlePinSessionClick();
+
+  assert.equal(api.getCurrentSession().pinned, 0);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /unsupported/);
+}
+
 testPersistentCacheReusesRenderedHtmlAcrossMessageObjects();
 testPreviewAndFullModesUseDistinctPersistentEntries();
 testSearchHitUsesExcerptInsteadOfAutoExpandingFullLongMessage();
@@ -582,3 +604,7 @@ testBrowseRenderPlanShowsLatestWindowOnly();
 testSearchRenderPlanOnlyReturnsMatchedWindow();
 testVirtualWindowKeepsBoundedVisibleRangeWithSpacers();
 testVirtualWindowUsesMeasuredVariableHeights();
+testPinFailureDoesNotMutateCurrentSession().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});

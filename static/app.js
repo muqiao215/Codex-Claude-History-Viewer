@@ -109,6 +109,7 @@ let measuredMessageHeights = new Map();
 let browseVirtualRefreshFrame = null;
 let pendingBrowseVirtualScrollTop = null;
 let currentBrowseVirtualRenderScrollTop = null;
+let pinSessionInFlight = false;
 
 function createEmptySessionSearchState(query = "") {
   return {
@@ -2204,6 +2205,7 @@ function renderSessionHeader(session) {
   if (sessionActionsEl) sessionActionsEl.style.display = sourceIsReadOnly() ? "none" : "flex";
   if (pinSessionBtn) {
     pinSessionBtn.textContent = session.pinned ? "📌 Unpin" : "📌 Pin";
+    pinSessionBtn.disabled = pinSessionInFlight || sourceIsReadOnly();
   }
 }
 
@@ -2771,19 +2773,35 @@ messagesEl.addEventListener("click", async (event) => {
   renderMessages(currentMessages, { restoreScrollTop: messagesEl.scrollTop });
 });
 
-pinSessionBtn.addEventListener("click", async () => {
+async function handlePinSessionClick() {
   if (!currentSession) return;
+  if (pinSessionInFlight || sourceIsReadOnly()) return;
   const newPinned = !currentSession.pinned;
   const base = apiBase();
-  await fetch(`${base}/session/${encodeURIComponent(currentSession.id)}/pin`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pinned: newPinned }),
-  });
-  currentSession.pinned = newPinned ? 1 : 0;
+  pinSessionInFlight = true;
   renderSessionHeader(currentSession);
-  reloadList();
-});
+  try {
+    const res = await fetch(`${base}/session/${encodeURIComponent(currentSession.id)}/pin`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned: newPinned }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
+    currentSession.pinned = newPinned ? 1 : 0;
+    renderSessionHeader(currentSession);
+    await reloadList();
+  } catch (err) {
+    alert(`Pin session failed: ${err?.message || err}`);
+  } finally {
+    pinSessionInFlight = false;
+    if (currentSession) renderSessionHeader(currentSession);
+  }
+}
+
+pinSessionBtn.addEventListener("click", handlePinSessionClick);
 
 renameSessionBtn.addEventListener("click", async () => {
   if (!currentSession) return;
