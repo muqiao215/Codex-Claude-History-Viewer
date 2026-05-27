@@ -1,3 +1,5 @@
+import { Virtualizer, elementScroll, measureElement, observeElementOffset, observeElementRect } from "./vendor/tanstack-virtual-core/index.js";
+
 const sessionListEl = document.getElementById("sessionList");
 const messagesEl = document.getElementById("messages");
 const sessionHeaderEl = document.getElementById("sessionHeader");
@@ -110,6 +112,10 @@ let browseVirtualRefreshFrame = null;
 let pendingBrowseVirtualScrollTop = null;
 let currentBrowseVirtualRenderScrollTop = null;
 let pinSessionInFlight = false;
+let browseVirtualizer = null;
+let browseVirtualItems = [];
+let browseVirtualizerRefreshQueued = false;
+let browseVirtualizerUpdating = false;
 
 function createEmptySessionSearchState(query = "") {
   return {
@@ -136,17 +142,165 @@ function getSafeMessageRenderCount() {
 }
 
 function growMessageRenderLimit() {
+  const previous = currentMessageRenderLimit;
   const next = Math.min(
     currentMessageRenderLimit + SESSION_MESSAGE_LOAD_STEP,
     currentVisibleMessageCount || currentMessageRenderLimit,
   );
   if (next <= currentMessageRenderLimit) return false;
   currentMessageRenderLimit = next;
+  return { previous, next };
+}
+
+function getBrowseWindowAnchorAdjustment(messages, roleFilters, previousRenderCount, nextRenderCount) {
+  const previousPlan = buildMessageRenderPlan(
+    messages,
+    roleFilters,
+    "",
+    currentSessionSearch,
+    previousRenderCount,
+  );
+  const nextPlan = buildMessageRenderPlan(
+    messages,
+    roleFilters,
+    "",
+    currentSessionSearch,
+    nextRenderCount,
+  );
+  const previousFirstIndex = previousPlan.items[0]?.index;
+  if (!Number.isInteger(previousFirstIndex)) return 0;
+
+  return nextPlan.items.reduce((total, { msg, index }) => {
+    if (index >= previousFirstIndex) return total;
+    return total + getMessageRowHeight(msg, index);
+  }, 0);
+}
+
+function collectRenderedMessageElements(root = messagesEl, results = []) {
+  if (!root || !root.children) return results;
+  Array.from(root.children).forEach((child) => {
+    if (Number.isInteger(Number(child?.dataset?.messageIndex))) {
+      results.push(child);
+    }
+    collectRenderedMessageElements(child, results);
+  });
+  return results;
+}
+
+function captureMessageViewportAnchor() {
+  if (!messagesEl || typeof messagesEl.getBoundingClientRect !== "function") return null;
+  const containerRect = messagesEl.getBoundingClientRect();
+  const containerTop = Number(containerRect?.top);
+  const containerBottom = Number(containerRect?.bottom);
+  if (!Number.isFinite(containerTop) || !Number.isFinite(containerBottom)) return null;
+
+  const candidates = collectRenderedMessageElements();
+  let best = null;
+  let bestDistance = Infinity;
+  candidates.forEach((element) => {
+    if (!element || typeof element.getBoundingClientRect !== "function") return;
+    const index = Number(element.dataset?.messageIndex);
+    if (!Number.isInteger(index)) return;
+    const rect = element.getBoundingClientRect();
+    const top = Number(rect?.top);
+    const bottom = Number(rect?.bottom);
+    if (!Number.isFinite(top) || !Number.isFinite(bottom)) return;
+    if (bottom < containerTop || top > containerBottom) return;
+    const distance = Math.abs(top - containerTop);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = {
+        index,
+        offsetTop: top - containerTop,
+      };
+    }
+  });
+  return best;
+}
+
+function restoreMessageViewportAnchor(anchor) {
+  if (!anchor || !Number.isInteger(anchor.index)) return false;
+  if (!messagesEl || typeof messagesEl.getBoundingClientRect !== "function") return false;
+  const containerRect = messagesEl.getBoundingClientRect();
+  const containerTop = Number(containerRect?.top);
+  if (!Number.isFinite(containerTop)) return false;
+
+  const element = collectRenderedMessageElements().find((candidate) => {
+    return Number(candidate?.dataset?.messageIndex) === anchor.index;
+  });
+  if (!element || typeof element.getBoundingClientRect !== "function") return false;
+  const rect = element.getBoundingClientRect();
+  const top = Number(rect?.top);
+  if (!Number.isFinite(top)) return false;
+
+  const delta = (top - containerTop) - (Number(anchor.offsetTop) || 0);
+  if (Math.abs(delta) < 1) return true;
+  messagesEl.scrollTop += delta;
   return true;
 }
 
 function clearMeasuredMessageHeights() {
   measuredMessageHeights = new Map();
+}
+
+function queueBrowseVirtualizerRender() {
+  if (browseVirtualizerRefreshQueued) return;
+  browseVirtualizerRefreshQueued = true;
+  requestAnimationFrame(() => {
+    browseVirtualizerRefreshQueued = false;
+    renderMessages(currentMessages, { restoreScrollTop: messagesEl.scrollTop });
+  });
+}
+
+function disposeBrowseVirtualizer() {
+  if (browseVirtualizer && typeof browseVirtualizer._didMount === "function") {
+    browseVirtualizer._didMount()();
+  } else if (browseVirtualizer && typeof browseVirtualizer.cleanup === "function") {
+    browseVirtualizer.cleanup();
+  }
+  browseVirtualizer = null;
+  browseVirtualItems = [];
+}
+
+function getBrowseVirtualizer(items) {
+  const count = Array.isArray(items) ? items.length : 0;
+  const getItemKey = (position) => {
+    const item = browseVirtualItems[position];
+    return Number.isInteger(item?.index) ? item.index : position;
+  };
+  const options = {
+    count,
+    getScrollElement: () => messagesEl,
+    estimateSize: (position) => {
+      const item = browseVirtualItems[position];
+      if (!item) return MESSAGE_VIRTUAL_ESTIMATED_HEIGHT;
+      return getMessageRowHeight(item.msg, item.index);
+    },
+    getItemKey,
+    overscan: Math.ceil(MESSAGE_VIRTUAL_OVERSCAN_PX / MESSAGE_VIRTUAL_ESTIMATED_HEIGHT),
+    gap: MESSAGE_VIRTUAL_ROW_GAP,
+    anchorTo: "end",
+    observeElementOffset,
+    observeElementRect,
+    measureElement,
+    scrollToFn: elementScroll,
+    onChange: () => {
+      if (browseVirtualizerUpdating) return;
+      queueBrowseVirtualizerRender();
+    },
+  };
+
+  browseVirtualItems = items;
+  browseVirtualizerUpdating = true;
+  if (!browseVirtualizer) {
+    browseVirtualizer = new Virtualizer(options);
+    browseVirtualizer._willUpdate();
+  } else {
+    browseVirtualizer.setOptions(options);
+    browseVirtualizer._willUpdate();
+  }
+  browseVirtualizerUpdating = false;
+  return browseVirtualizer;
 }
 
 function resetBrowseVirtualRefresh({ cancel = true } = {}) {
@@ -267,6 +421,13 @@ function buildBrowseVirtualRenderState(items, scrollTop, viewportHeight) {
     ...windowState,
     items: items.slice(windowState.start, windowState.end),
   };
+}
+
+function getBrowseVirtualBottomScrollTop(items, viewportHeight) {
+  const totalHeight = items.reduce((total, { msg, index }) => {
+    return total + getMessageRowHeight(msg, index);
+  }, 0);
+  return Math.max(0, totalHeight - Math.max(0, Number(viewportHeight) || 0));
 }
 
 function recordMeasuredMessageHeight(wrapper) {
@@ -1917,7 +2078,7 @@ function buildMessageElement(msg, index, term) {
   return { wrapper, hits };
 }
 
-function renderMessages(messages, { restoreScrollTop = null } = {}) {
+function renderMessages(messages, { restoreScrollTop = null, scrollToBottom = false, restoreAnchor = null } = {}) {
   cancelPendingMessageRender();
   const renderSeq = messageRenderSeq;
   const fallbackScrollTop = Number.isFinite(restoreScrollTop)
@@ -1938,20 +2099,21 @@ function renderMessages(messages, { restoreScrollTop = null } = {}) {
     visibleMessages.push({ msg, index });
   });
   currentVisibleMessageCount = visibleMessages.length;
-  const renderPlan = term
-    ? buildMessageRenderPlan(
-        messages,
-        roleFilters,
-        term,
-        currentSessionSearch,
-        getSafeMessageRenderCount(),
-      )
-    : null;
-  const activeMessages = term ? renderPlan.items : visibleMessages.slice(0, currentMessageRenderLimit);
+  const renderPlan = buildMessageRenderPlan(
+    messages,
+    roleFilters,
+    term,
+    currentSessionSearch,
+    getSafeMessageRenderCount(),
+  );
+  const activeMessages = renderPlan.items;
   const renderedCount = activeMessages.length;
-  const hasHiddenMessages = !term && renderedCount < currentVisibleMessageCount;
+  const hasHiddenMessages = !term && renderPlan.hiddenBefore > 0;
 
   setMessagesVirtualized(!term && renderedCount > 0);
+  if (term || renderedCount === 0) {
+    disposeBrowseVirtualizer();
+  }
 
   if (renderedCount === 0) {
     const empty = document.createElement("div");
@@ -1989,7 +2151,7 @@ function renderMessages(messages, { restoreScrollTop = null } = {}) {
     return;
   }
 
-  const windowControl = term ? buildMessageWindowControl(renderPlan) : null;
+  const windowControl = buildMessageWindowControl(renderPlan);
   if (windowControl) {
     messagesEl.appendChild(windowControl);
   }
@@ -2006,12 +2168,31 @@ function renderMessages(messages, { restoreScrollTop = null } = {}) {
 
   if (!term) {
     resetBrowseVirtualRefresh();
-    currentBrowseVirtualRenderScrollTop = fallbackScrollTop;
-    const viewportHeight = Math.max(messagesEl.clientHeight || 0, MESSAGE_VIRTUAL_ESTIMATED_HEIGHT * 2);
-    const virtualState = buildBrowseVirtualRenderState(activeMessages, fallbackScrollTop, viewportHeight);
+    const virtualizer = getBrowseVirtualizer(activeMessages);
+    const totalSize = virtualizer.getTotalSize();
+    try {
+      messagesEl.scrollHeight = Math.max(messagesEl.scrollHeight || 0, totalSize);
+    } catch {
+      // Browser DOM exposes scrollHeight as read-only; tests use a writable fake.
+    }
+    let renderScrollTop = fallbackScrollTop;
+    if (scrollToBottom) {
+      renderScrollTop = Math.max(0, totalSize - virtualizer.getSize());
+      virtualizer.scrollToOffset(renderScrollTop, { behavior: "auto" });
+    } else if (Number.isFinite(fallbackScrollTop)) {
+      renderScrollTop = fallbackScrollTop;
+      virtualizer.scrollToOffset(fallbackScrollTop, { behavior: "auto" });
+    }
+    virtualizer.scrollOffset = renderScrollTop;
+    currentBrowseVirtualRenderScrollTop = renderScrollTop;
+    const virtualItems = virtualizer.getVirtualItems();
+    const topOffset = virtualItems.length ? virtualItems[0].start : 0;
+    const bottomOffset = virtualItems.length
+      ? Math.max(0, totalSize - virtualItems[virtualItems.length - 1].end)
+      : totalSize;
     const topSpacer = document.createElement("div");
     topSpacer.className = "message-virtual-spacer";
-    topSpacer.style.height = `${virtualState.topSpacer}px`;
+    topSpacer.style.height = `${topOffset}px`;
     messagesEl.appendChild(topSpacer);
 
     const windowEl = document.createElement("div");
@@ -2020,7 +2201,7 @@ function renderMessages(messages, { restoreScrollTop = null } = {}) {
 
     const bottomSpacer = document.createElement("div");
     bottomSpacer.className = "message-virtual-spacer";
-    bottomSpacer.style.height = `${virtualState.bottomSpacer}px`;
+    bottomSpacer.style.height = `${bottomOffset}px`;
     messagesEl.appendChild(bottomSpacer);
 
     let offset = 0;
@@ -2028,15 +2209,18 @@ function renderMessages(messages, { restoreScrollTop = null } = {}) {
       if (renderSeq !== messageRenderSeq) return;
 
       const fragment = document.createDocumentFragment();
-      const batchEnd = Math.min(offset + MESSAGE_RENDER_BATCH_SIZE, virtualState.items.length);
+      const batchEnd = Math.min(offset + MESSAGE_RENDER_BATCH_SIZE, virtualItems.length);
       for (; offset < batchEnd; offset += 1) {
-        const { msg, index } = virtualState.items[offset];
+        const virtualItem = virtualItems[offset];
+        const { msg, index } = activeMessages[virtualItem.index];
         const rendered = buildMessageElement(msg, index, "");
+        rendered.wrapper.dataset.index = String(virtualItem.index);
+        rendered.wrapper.setAttribute("data-index", String(virtualItem.index));
         fragment.appendChild(rendered.wrapper);
       }
       windowEl.appendChild(fragment);
 
-      if (offset < virtualState.items.length) {
+      if (offset < virtualItems.length) {
         requestAnimationFrame(renderBatch);
         return;
       }
@@ -2045,19 +2229,14 @@ function renderMessages(messages, { restoreScrollTop = null } = {}) {
         ? `Rendered ${renderedCount.toLocaleString()} of ${currentVisibleMessageCount.toLocaleString()} messages`
         : "";
 
-      if (hasHiddenMessages) {
-        const progress = document.createElement("div");
-        progress.className = "messages-progress muted";
-        progress.innerHTML = `
-          <span>Showing ${renderedCount.toLocaleString()} of ${currentVisibleMessageCount.toLocaleString()} messages.</span>
-          <button type="button" class="btn small" data-load-more-messages="true">Load more messages</button>
-        `;
-        messagesEl.appendChild(progress);
-      }
-
       flushPendingLazyMessageBodiesForRoot(windowEl);
+      Array.from(windowEl.children || []).forEach((child) => {
+        virtualizer.measureElement(child);
+      });
       updateMatchNavState("");
-      messagesEl.scrollTop = fallbackScrollTop;
+      if (restoreAnchor) {
+        restoreMessageViewportAnchor(restoreAnchor);
+      }
       currentBrowseVirtualRenderScrollTop = null;
       scheduleVirtualMeasurement(windowEl, renderSeq);
     };
@@ -2103,18 +2282,11 @@ function renderMessages(messages, { restoreScrollTop = null } = {}) {
       sessionSearchCount.textContent = "";
     }
 
-    if (hasHiddenMessages) {
-      const progress = document.createElement("div");
-      progress.className = "messages-progress muted";
-      progress.innerHTML = `
-        <span>Showing ${renderedCount.toLocaleString()} of ${currentVisibleMessageCount.toLocaleString()} messages.</span>
-        <button type="button" class="btn small" data-load-more-messages="true">Load more messages</button>
-      `;
-      messagesEl.appendChild(progress);
-    }
-
     updateMatchNavState(term);
-    messagesEl.scrollTop = fallbackScrollTop;
+    messagesEl.scrollTop = scrollToBottom ? messagesEl.scrollHeight : fallbackScrollTop;
+    if (restoreAnchor) {
+      restoreMessageViewportAnchor(restoreAnchor);
+    }
   };
 
   renderBatch();
@@ -2474,9 +2646,8 @@ async function fetchSession(sessionId) {
       full_text_loaded: !msg?.is_truncated,
     }));
     expandedMessageIndexes = new Set();
-    messagesEl.scrollTop = 0;
     renderSessionHeader(currentSession);
-    renderMessages(currentMessages);
+    renderMessages(currentMessages, { scrollToBottom: true });
   } catch (err) {
     if (seq !== sessionFetchSeq) return;
     renderStatusMessage(`Failed to load session (${err?.message || err})`, { kind: "error" });
@@ -2731,9 +2902,22 @@ copyResumeCmdWslBtn.addEventListener("click", () => {
 messagesEl.addEventListener("scroll", () => {
   if (sessionSearchInput.value.trim()) return;
   const scrollTop = messagesEl.scrollTop;
-  const distanceToBottom = messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
-  if (currentMessageRenderLimit < currentVisibleMessageCount && distanceToBottom <= 900 && growMessageRenderLimit()) {
-    renderMessages(currentMessages, { restoreScrollTop: scrollTop });
+  if (currentMessageRenderLimit < currentVisibleMessageCount && scrollTop <= 900) {
+    const roleFilters = getRoleFilters();
+    const anchor = captureMessageViewportAnchor();
+    const growth = growMessageRenderLimit();
+    if (growth) {
+      const anchorAdjustment = getBrowseWindowAnchorAdjustment(
+        currentMessages,
+        roleFilters,
+        growth.previous,
+        growth.next,
+      );
+      renderMessages(currentMessages, {
+        restoreScrollTop: scrollTop + anchorAdjustment,
+        restoreAnchor: anchor,
+      });
+    }
     return;
   }
   scheduleBrowseVirtualRefresh(scrollTop);
@@ -2744,18 +2928,45 @@ messagesEl.addEventListener("click", async (event) => {
   const loadMore = target ? target.closest("[data-load-more-messages]") : null;
   if (loadMore) {
     const scrollTop = messagesEl.scrollTop;
-    if (growMessageRenderLimit()) {
-      renderMessages(currentMessages, { restoreScrollTop: scrollTop });
+    const roleFilters = getRoleFilters();
+    const anchor = captureMessageViewportAnchor();
+    const growth = growMessageRenderLimit();
+    if (growth) {
+      const anchorAdjustment = getBrowseWindowAnchorAdjustment(
+        currentMessages,
+        roleFilters,
+        growth.previous,
+        growth.next,
+      );
+      renderMessages(currentMessages, {
+        restoreScrollTop: scrollTop + anchorAdjustment,
+        restoreAnchor: anchor,
+      });
     }
     return;
   }
   const windowAction = target ? target.closest("[data-message-window-action]") : null;
   if (windowAction) {
-    currentMessageRenderLimit += SESSION_MESSAGE_LOAD_STEP;
     if (sessionSearchInput.value.trim()) {
+      currentMessageRenderLimit += SESSION_MESSAGE_LOAD_STEP;
       refreshSessionSearch({ resetRenderCount: false });
     } else {
-      renderMessages(currentMessages);
+      const scrollTop = messagesEl.scrollTop;
+      const roleFilters = getRoleFilters();
+      const anchor = captureMessageViewportAnchor();
+      const growth = growMessageRenderLimit();
+      if (growth) {
+        const anchorAdjustment = getBrowseWindowAnchorAdjustment(
+          currentMessages,
+          roleFilters,
+          growth.previous,
+          growth.next,
+        );
+        renderMessages(currentMessages, {
+          restoreScrollTop: scrollTop + anchorAdjustment,
+          restoreAnchor: anchor,
+        });
+      }
     }
     return;
   }
@@ -3050,3 +3261,59 @@ async function bootstrapApp() {
 }
 
 bootstrapApp();
+
+if (globalThis.__CCHV_TEST__) {
+  globalThis.__testApi = {
+    getMessageHtml,
+    buildMessageElement,
+    buildResumeCommands,
+    getResumeCommandLabels,
+    flushLazyMessageBodies() {
+      const observers = (globalThis.IntersectionObserver?.instances || []).slice();
+      observers.forEach((observer) => {
+        const entries = [...observer.targets].map((target) => ({ target, isIntersecting: true }));
+        if (entries.length) {
+          observer.callback(entries);
+        }
+      });
+    },
+    flushPendingLazyMessageBodiesForRoot,
+    getBrowseVirtualRefreshScrollTop,
+    setCurrentSession(value) { currentSession = value; },
+    getCurrentSession() { return currentSession; },
+    setCurrentSystem(value) { currentSystem = value; },
+    setCurrentSource(value) { currentSource = value; },
+    setBrowseVirtualRenderScrollTop(value) {
+      currentBrowseVirtualRenderScrollTop = value;
+    },
+    setCurrentSessionSearchData(query, entries) {
+      currentSessionSearch = {
+        query,
+        matches: new Map(entries || []),
+        matchCount: Array.isArray(entries) ? entries.length : 0,
+        messageMatchCount: Array.isArray(entries) ? entries.length : 0,
+        loading: false,
+        error: "",
+      };
+    },
+    setExpandedMessageIndexes(values) {
+      expandedMessageIndexes = new Set(values || []);
+    },
+    setRenderMarkdown(value) { renderMarkdown = value; },
+    getStorageKeyInfo() {
+      return {
+        index: MARKDOWN_CACHE_INDEX_KEY,
+        prefix: MARKDOWN_CACHE_ENTRY_PREFIX,
+      };
+    },
+    buildMessageRenderPlan,
+    buildVirtualWindow,
+    getBrowseWindowAnchorAdjustment,
+    getBrowseVirtualBottomScrollTop,
+    captureMessageViewportAnchor,
+    restoreMessageViewportAnchor,
+    renderMessages,
+    getMessagesElement() { return messagesEl; },
+    handlePinSessionClick,
+  };
+}

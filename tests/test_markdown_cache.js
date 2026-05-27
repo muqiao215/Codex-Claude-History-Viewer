@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const vm = require("node:vm");
+const { pathToFileURL } = require("node:url");
 
 class FakeClassList {
   constructor() {
@@ -53,11 +53,24 @@ class FakeElement {
     this.disabled = false;
     this.checked = true;
     this.parentNode = null;
+    this.ownerDocument = null;
     this._queryCache = new Map();
+    this._rect = { top: 0, bottom: 0, width: 960, height: 640 };
+    this.offsetWidth = 960;
+    this.offsetHeight = 640;
+    this.clientHeight = 640;
+    this.scrollHeight = 640;
+    this.scrollTop = 0;
   }
 
   appendChild(child) {
     if (!child) return child;
+    if (child.tagName === "#FRAGMENT") {
+      const fragmentChildren = [...child.children];
+      fragmentChildren.forEach((fragmentChild) => this.appendChild(fragmentChild));
+      child.children = [];
+      return child;
+    }
     child.parentNode = this;
     this.children.push(child);
     return child;
@@ -82,6 +95,12 @@ class FakeElement {
 
   setAttribute(name, value) {
     this.attributes.set(name, String(value));
+    if (name.startsWith("data-")) {
+      const key = name
+        .slice(5)
+        .replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
+      this.dataset[key] = String(value);
+    }
   }
 
   getAttribute(name) {
@@ -117,10 +136,27 @@ class FakeElement {
 
   scrollIntoView() {}
 
+  scrollTo(value) {
+    if (typeof value === "number") {
+      this.scrollTop = value;
+      return;
+    }
+    if (value && typeof value === "object" && Number.isFinite(value.top)) {
+      this.scrollTop = value.top;
+    }
+  }
+
   setPointerCapture() {}
 
   getBoundingClientRect() {
-    return { width: 960, height: 640 };
+    return this._rect;
+  }
+
+  setBoundingClientRect(rect) {
+    this._rect = {
+      ...this._rect,
+      ...rect,
+    };
   }
 }
 
@@ -147,24 +183,58 @@ function createDocument() {
   const documentElement = new FakeElement("html");
   documentElement.dataset = {};
   const body = new FakeElement("body");
+  const fakeWindow = {
+    addEventListener() {},
+    removeEventListener() {},
+    requestAnimationFrame(callback) {
+      queueMicrotask(callback);
+      return 1;
+    },
+    cancelAnimationFrame() {},
+    setTimeout() {
+      return 1;
+    },
+    clearTimeout() {},
+    ResizeObserver: null,
+    performance: { now: () => Date.now() },
+  };
+  documentElement.ownerDocument = { defaultView: fakeWindow };
+  body.ownerDocument = { defaultView: fakeWindow };
+  const roleInputs = ["user", "assistant", "system", "developer", "tool", "other"].map((role) => {
+    const input = new FakeElement("input");
+    input.dataset.role = role;
+    input.checked = true;
+    input.ownerDocument = { defaultView: fakeWindow };
+    return input;
+  });
 
-  return {
+  const document = {
     documentElement,
     body,
+    defaultView: fakeWindow,
     getElementById(id) {
       if (!elements.has(id)) {
-        elements.set(id, new FakeElement("div"));
+        const element = new FakeElement("div");
+        element.ownerDocument = document;
+        elements.set(id, element);
       }
       return elements.get(id);
     },
-    querySelectorAll() {
+    querySelectorAll(selector) {
+      if (selector === ".roles input[type=checkbox]") {
+        return roleInputs;
+      }
       return [];
     },
     createElement(tagName) {
-      return new FakeElement(tagName);
+      const element = new FakeElement(tagName);
+      element.ownerDocument = document;
+      return element;
     },
     createDocumentFragment() {
-      return new FakeElement("#fragment");
+      const element = new FakeElement("#fragment");
+      element.ownerDocument = document;
+      return element;
     },
     createTextNode(text) {
       return { nodeValue: String(text), textContent: String(text), parentNode: null };
@@ -177,6 +247,8 @@ function createDocument() {
       };
     },
   };
+  fakeWindow.document = document;
+  return document;
 }
 
 class FakeIntersectionObserver {
@@ -201,63 +273,14 @@ class FakeIntersectionObserver {
 
 FakeIntersectionObserver.instances = [];
 
-function loadApp({ fetchImpl, alertImpl } = {}) {
+async function loadApp({ fetchImpl, alertImpl } = {}) {
   const repoDir = path.resolve(__dirname, "..");
   const sourcePath = path.join(repoDir, "static", "app.js");
-  const source = fs.readFileSync(sourcePath, "utf8") + `
-globalThis.__testApi = {
-  getMessageHtml,
-  buildMessageElement,
-  buildResumeCommands,
-  getResumeCommandLabels,
-  flushLazyMessageBodies() {
-    const observers = (globalThis.IntersectionObserver?.instances || []).slice();
-    observers.forEach((observer) => {
-      const entries = [...observer.targets].map((target) => ({ target, isIntersecting: true }));
-      if (entries.length) {
-        observer.callback(entries);
-      }
-    });
-  },
-  flushPendingLazyMessageBodiesForRoot,
-  getBrowseVirtualRefreshScrollTop,
-  setCurrentSession(value) { currentSession = value; },
-  getCurrentSession() { return currentSession; },
-  setCurrentSystem(value) { currentSystem = value; },
-  setCurrentSource(value) { currentSource = value; },
-  setBrowseVirtualRenderScrollTop(value) {
-    currentBrowseVirtualRenderScrollTop = value;
-  },
-  setCurrentSessionSearchData(query, entries) {
-    currentSessionSearch = {
-      query,
-      matches: new Map(entries || []),
-      matchCount: Array.isArray(entries) ? entries.length : 0,
-      messageMatchCount: Array.isArray(entries) ? entries.length : 0,
-      loading: false,
-      error: "",
-    };
-  },
-  setExpandedMessageIndexes(values) {
-    expandedMessageIndexes = new Set(values || []);
-  },
-  setRenderMarkdown(value) { renderMarkdown = value; },
-  getStorageKeyInfo() {
-    return {
-      index: MARKDOWN_CACHE_INDEX_KEY,
-      prefix: MARKDOWN_CACHE_ENTRY_PREFIX,
-    };
-  },
-  buildMessageRenderPlan,
-  buildVirtualWindow,
-  handlePinSessionClick,
-};
-`;
-
   const localStorage = createStorage();
   const document = createDocument();
-  const context = vm.createContext({
-    console,
+  Object.assign(globalThis, {
+    __CCHV_TEST__: true,
+    __testApi: undefined,
     document,
     localStorage,
     navigator: {
@@ -265,15 +288,13 @@ globalThis.__testApi = {
         writeText: async () => {},
       },
     },
-    window: {
-      addEventListener() {},
-    },
+    window: document.defaultView,
     fetch: fetchImpl || (async () => ({
       ok: true,
       json: async () => ({ items: [], has_more: false, next_offset: 0, matches: [] }),
     })),
     requestAnimationFrame(callback) {
-      callback();
+      queueMicrotask(callback);
       return 1;
     },
     cancelAnimationFrame() {},
@@ -286,17 +307,19 @@ globalThis.__testApi = {
     Element: FakeElement,
     NodeFilter: { SHOW_TEXT: 4 },
     IntersectionObserver: FakeIntersectionObserver,
+    process: { env: { NODE_ENV: "test" } },
   });
 
-  vm.runInContext(source, context, { filename: sourcePath });
+  const href = `${pathToFileURL(sourcePath).href}?test=${Date.now()}-${Math.random()}`;
+  await import(href);
   return {
-    api: context.__testApi,
+    api: globalThis.__testApi,
     localStorage,
   };
 }
 
-function testPersistentCacheReusesRenderedHtmlAcrossMessageObjects() {
-  const { api, localStorage } = loadApp();
+async function testPersistentCacheReusesRenderedHtmlAcrossMessageObjects() {
+  const { api, localStorage } = await loadApp();
   let renderCalls = 0;
   api.setCurrentSystem("windows");
   api.setCurrentSource("codex");
@@ -320,8 +343,8 @@ function testPersistentCacheReusesRenderedHtmlAcrossMessageObjects() {
   assert.ok(localStorage.getItem(storageKeys.index), "expected markdown cache index to be persisted");
 }
 
-function testPreviewAndFullModesUseDistinctPersistentEntries() {
-  const { api } = loadApp();
+async function testPreviewAndFullModesUseDistinctPersistentEntries() {
+  const { api } = await loadApp();
   let renderCalls = 0;
   api.setCurrentSystem("windows");
   api.setCurrentSource("codex");
@@ -346,8 +369,8 @@ function testPreviewAndFullModesUseDistinctPersistentEntries() {
   assert.equal(renderCalls, 2, "expected preview/full html to come from persistent cache on reload");
 }
 
-function testSearchHitUsesExcerptInsteadOfAutoExpandingFullLongMessage() {
-  const { api } = loadApp();
+async function testSearchHitUsesExcerptInsteadOfAutoExpandingFullLongMessage() {
+  const { api } = await loadApp();
   const renderedInputs = [];
   api.setCurrentSystem("windows");
   api.setCurrentSource("codex");
@@ -376,8 +399,8 @@ function testSearchHitUsesExcerptInsteadOfAutoExpandingFullLongMessage() {
   assert.deepEqual(renderedInputs, ["...\nneedle nearby\n..."]);
 }
 
-function testMessageBodiesRenderLazilyUntilVisible() {
-  const { api } = loadApp();
+async function testMessageBodiesRenderLazilyUntilVisible() {
+  const { api } = await loadApp();
   const renderedInputs = [];
   api.setCurrentSystem("windows");
   api.setCurrentSource("codex");
@@ -408,8 +431,8 @@ function testMessageBodiesRenderLazilyUntilVisible() {
   assert.deepEqual(renderedInputs, ["lazy body"]);
 }
 
-function testMountedVirtualWindowBodiesFlushWithoutIntersectionObserver() {
-  const { api } = loadApp();
+async function testMountedVirtualWindowBodiesFlushWithoutIntersectionObserver() {
+  const { api } = await loadApp();
   const renderedInputs = [];
   api.setCurrentSystem("linux");
   api.setCurrentSource("codex");
@@ -451,8 +474,8 @@ function testMountedVirtualWindowBodiesFlushWithoutIntersectionObserver() {
   assert.deepEqual(renderedInputs, ["mounted virtual row", "second mounted row"]);
 }
 
-function testBrowseVirtualRefreshUsesInFlightRestoreScrollTop() {
-  const { api } = loadApp();
+async function testBrowseVirtualRefreshUsesInFlightRestoreScrollTop() {
+  const { api } = await loadApp();
   api.setBrowseVirtualRenderScrollTop(20_000);
   assert.equal(api.getBrowseVirtualRefreshScrollTop(0), 20_000);
   assert.equal(api.getBrowseVirtualRefreshScrollTop(75), 20_000);
@@ -460,8 +483,8 @@ function testBrowseVirtualRefreshUsesInFlightRestoreScrollTop() {
   assert.equal(api.getBrowseVirtualRefreshScrollTop(75), 75);
 }
 
-function testLinuxResumeCommandsUseShellFriendlyVariants() {
-  const { api } = loadApp();
+async function testLinuxResumeCommandsUseShellFriendlyVariants() {
+  const { api } = await loadApp();
   const labels = api.getResumeCommandLabels("linux");
   assert.equal(labels.primary, "Resume Shell");
   assert.equal(labels.secondary, "Resume Plain");
@@ -471,8 +494,8 @@ function testLinuxResumeCommandsUseShellFriendlyVariants() {
   assert.equal(commands.wsl, "codex resume 019-demo");
 }
 
-function testClaudeResumeCommandsAppendDangerousSkipPermissions() {
-  const { api } = loadApp();
+async function testClaudeResumeCommandsAppendDangerousSkipPermissions() {
+  const { api } = await loadApp();
   const commands = api.buildResumeCommands("windows", "claude", "C:\\Users\\11614", "8f9b64e5-af3f-4735-af95-7b1d6147ddf5");
   assert.equal(
     commands.ps,
@@ -484,8 +507,8 @@ function testClaudeResumeCommandsAppendDangerousSkipPermissions() {
   );
 }
 
-function testBrowseRenderPlanShowsLatestWindowOnly() {
-  const { api } = loadApp();
+async function testBrowseRenderPlanShowsLatestWindowOnly() {
+  const { api } = await loadApp();
   const messages = Array.from({ length: 450 }, (_, index) => ({
     role: "assistant",
     kind: "message",
@@ -513,8 +536,97 @@ function testBrowseRenderPlanShowsLatestWindowOnly() {
   assert.equal(plan.items.at(-1).msg.text, "msg-449");
 }
 
-function testSearchRenderPlanOnlyReturnsMatchedWindow() {
-  const { api } = loadApp();
+function collectRenderedMessageIndexes(root, results = []) {
+  if (!root || !root.children) return results;
+  Array.from(root.children).forEach((child) => {
+    const index = Number(child?.dataset?.messageIndex);
+    if (Number.isInteger(index)) {
+      results.push(index);
+    }
+    collectRenderedMessageIndexes(child, results);
+  });
+  return results;
+}
+
+async function testBrowseRenderMountsLatestWindowByDefault() {
+  const { api } = await loadApp();
+  const messages = Array.from({ length: 450 }, (_, index) => ({
+    role: "assistant",
+    kind: "message",
+    text: `msg-${index}`,
+    ts_ms: index,
+  }));
+  const messagesEl = api.getMessagesElement();
+  messagesEl.clientHeight = 600;
+  messagesEl.scrollTop = 999_999;
+
+  api.renderMessages(messages, { scrollToBottom: true });
+
+  const indexes = collectRenderedMessageIndexes(messagesEl);
+  assert.ok(indexes.length > 0, "expected virtualized messages to mount");
+  assert.ok(!indexes.includes(0), "expected oldest messages to stay out of the default render window");
+  assert.ok(indexes.includes(449), "expected newest message to be reachable in the default render window");
+  assert.ok(indexes.every((index) => index >= 250), "expected default render window to use latest messages");
+}
+
+async function testBrowseWindowAnchorAdjustmentPreservesViewportWhenPrependingHistory() {
+  const { api } = await loadApp();
+  const messages = Array.from({ length: 450 }, (_, index) => ({
+    role: "assistant",
+    kind: "message",
+    text: `msg-${index}`,
+    ts_ms: index,
+  }));
+  const roleFilters = {
+    user: true,
+    assistant: true,
+    system: true,
+    developer: true,
+    tool: true,
+    other: true,
+  };
+
+  const adjustment = api.getBrowseWindowAnchorAdjustment(messages, roleFilters, 200, 400);
+
+  assert.equal(adjustment, 200 * 122);
+}
+
+async function testBrowseVirtualBottomScrollTopUsesEstimatedWindowHeight() {
+  const { api } = await loadApp();
+  const messages = Array.from({ length: 200 }, (_, index) => ({
+    msg: {
+      role: "assistant",
+      kind: "message",
+      text: `msg-${index}`,
+    },
+    index,
+  }));
+
+  assert.equal(api.getBrowseVirtualBottomScrollTop(messages, 600), (200 * 122) - 600);
+}
+
+async function testMessageViewportAnchorRestoresByMeasuredDomDelta() {
+  const { api } = await loadApp();
+  const messagesEl = api.getMessagesElement();
+  messagesEl.scrollTop = 500;
+  messagesEl.setBoundingClientRect({ top: 100, bottom: 700, height: 600 });
+
+  const row = new FakeElement("div");
+  row.dataset.messageIndex = "42";
+  row.setBoundingClientRect({ top: 180, bottom: 260, height: 80 });
+  messagesEl.appendChild(row);
+
+  const anchor = api.captureMessageViewportAnchor();
+  assert.equal(anchor.index, 42);
+  assert.equal(anchor.offsetTop, 80);
+
+  row.setBoundingClientRect({ top: 230, bottom: 310, height: 80 });
+  assert.equal(api.restoreMessageViewportAnchor(anchor), true);
+  assert.equal(messagesEl.scrollTop, 550);
+}
+
+async function testSearchRenderPlanOnlyReturnsMatchedWindow() {
+  const { api } = await loadApp();
   const messages = Array.from({ length: 250 }, (_, index) => ({
     role: index % 2 === 0 ? "assistant" : "tool",
     kind: "message",
@@ -543,8 +655,8 @@ function testSearchRenderPlanOnlyReturnsMatchedWindow() {
   assert.equal(plan.items.at(-1).index, 199);
 }
 
-function testVirtualWindowKeepsBoundedVisibleRangeWithSpacers() {
-  const { api } = loadApp();
+async function testVirtualWindowKeepsBoundedVisibleRangeWithSpacers() {
+  const { api } = await loadApp();
   const heights = Array.from({ length: 1000 }, () => 100);
   const plan = api.buildVirtualWindow(heights, 50_000, 600, 300);
 
@@ -560,8 +672,8 @@ function testVirtualWindowKeepsBoundedVisibleRangeWithSpacers() {
   );
 }
 
-function testVirtualWindowUsesMeasuredVariableHeights() {
-  const { api } = loadApp();
+async function testVirtualWindowUsesMeasuredVariableHeights() {
+  const { api } = await loadApp();
   const heights = [100, 100, 500, 100, 100, 100];
   const plan = api.buildVirtualWindow(heights, 250, 120, 0);
 
@@ -574,7 +686,7 @@ function testVirtualWindowUsesMeasuredVariableHeights() {
 
 async function testPinFailureDoesNotMutateCurrentSession() {
   const alerts = [];
-  const { api } = loadApp({
+  const { api } = await loadApp({
     fetchImpl: async () => ({
       ok: true,
       json: async () => ({ ok: false, error: "unsupported" }),
@@ -592,19 +704,25 @@ async function testPinFailureDoesNotMutateCurrentSession() {
   assert.match(alerts[0], /unsupported/);
 }
 
-testPersistentCacheReusesRenderedHtmlAcrossMessageObjects();
-testPreviewAndFullModesUseDistinctPersistentEntries();
-testSearchHitUsesExcerptInsteadOfAutoExpandingFullLongMessage();
-testMessageBodiesRenderLazilyUntilVisible();
-testMountedVirtualWindowBodiesFlushWithoutIntersectionObserver();
-testBrowseVirtualRefreshUsesInFlightRestoreScrollTop();
-testLinuxResumeCommandsUseShellFriendlyVariants();
-testClaudeResumeCommandsAppendDangerousSkipPermissions();
-testBrowseRenderPlanShowsLatestWindowOnly();
-testSearchRenderPlanOnlyReturnsMatchedWindow();
-testVirtualWindowKeepsBoundedVisibleRangeWithSpacers();
-testVirtualWindowUsesMeasuredVariableHeights();
-testPinFailureDoesNotMutateCurrentSession().catch((err) => {
+Promise.resolve()
+  .then(testPersistentCacheReusesRenderedHtmlAcrossMessageObjects)
+  .then(testPreviewAndFullModesUseDistinctPersistentEntries)
+  .then(testSearchHitUsesExcerptInsteadOfAutoExpandingFullLongMessage)
+  .then(testMessageBodiesRenderLazilyUntilVisible)
+  .then(testMountedVirtualWindowBodiesFlushWithoutIntersectionObserver)
+  .then(testBrowseVirtualRefreshUsesInFlightRestoreScrollTop)
+  .then(testLinuxResumeCommandsUseShellFriendlyVariants)
+  .then(testClaudeResumeCommandsAppendDangerousSkipPermissions)
+  .then(testBrowseRenderPlanShowsLatestWindowOnly)
+  .then(testBrowseRenderMountsLatestWindowByDefault)
+  .then(testBrowseWindowAnchorAdjustmentPreservesViewportWhenPrependingHistory)
+  .then(testBrowseVirtualBottomScrollTopUsesEstimatedWindowHeight)
+  .then(testMessageViewportAnchorRestoresByMeasuredDomDelta)
+  .then(testSearchRenderPlanOnlyReturnsMatchedWindow)
+  .then(testVirtualWindowKeepsBoundedVisibleRangeWithSpacers)
+  .then(testVirtualWindowUsesMeasuredVariableHeights)
+  .then(testPinFailureDoesNotMutateCurrentSession)
+  .catch((err) => {
   console.error(err);
   process.exitCode = 1;
-});
+  });
