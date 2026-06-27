@@ -47,7 +47,7 @@ html[data-code-theme="slate"] {
   --border: #cbd5e1;
   --accent: #0f766e;
   --assistant: #d8f3ef;
-  --user: #e2e8f0;
+  --user: #dbeafe;
   --system: #edf2f7;
   --thinking: #e0e7ff;
   --inline-code-bg: rgba(15, 118, 110, 0.09);
@@ -204,16 +204,48 @@ html[data-code-theme="dark"] {
   box-sizing: border-box;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 html, body {
   height: 100%;
 }
 
 body {
   margin: 0;
-  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   color: var(--text);
   background: var(--bg);
   overflow: hidden;
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+button:focus-visible,
+.btn:focus-visible,
+.tab:focus-visible,
+.session-item:focus-visible,
+input:focus-visible,
+select:focus-visible,
+[role="tab"]:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.btn:disabled,
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.msg,
+.session-item,
+.btn,
+.tab {
+  transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease;
 }
 
 #app {
@@ -237,6 +269,7 @@ body {
   flex-direction: column;
   gap: 16px;
   overflow: auto;
+  overscroll-behavior: contain;
   min-height: 0;
 }
 
@@ -436,6 +469,7 @@ body.is-resizing {
 
 .session-list {
   overflow-y: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 6px;
@@ -490,6 +524,7 @@ body.is-resizing {
   min-width: 0;
   height: 100vh;
   overflow: hidden;
+  position: relative;
 }
 
 .session-header {
@@ -512,24 +547,9 @@ body.is-resizing {
   flex-direction: column;
   gap: 12px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   flex: 1;
   min-height: 0;
-}
-
-.messages.virtualized {
-  gap: 0;
-}
-
-.message-virtual-spacer {
-  flex: 0 0 auto;
-  width: 100%;
-}
-
-.message-virtual-window {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-width: 0;
 }
 
 .msg {
@@ -641,10 +661,11 @@ body.is-resizing {
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .session-search input {
-  flex: 1;
+  flex: 1 1 220px;
 }
 
 .info-row {
@@ -878,6 +899,35 @@ mark.active {
 
 .muted {
   color: var(--muted);
+}
+
+.scroll-bottom-btn {
+  position: absolute;
+  right: 24px;
+  bottom: 24px;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  line-height: 1;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+  z-index: 20;
+  transition: filter 150ms ease, opacity 150ms ease, transform 150ms ease;
+}
+
+.scroll-bottom-btn:hover {
+  filter: brightness(1.12);
+}
+
+.scroll-bottom-btn[hidden] {
+  display: none;
 }
 
 @media (max-width: 900px) {
