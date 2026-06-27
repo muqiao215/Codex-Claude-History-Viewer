@@ -5,4 +5,3 @@ __pycache__/
 .omo/
 .playwright-mcp/
 demo/.recall.db
-session-audit-plan..md
