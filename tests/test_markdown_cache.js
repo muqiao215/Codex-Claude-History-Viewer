@@ -93,6 +93,11 @@ class FakeElement {
     return child;
   }
 
+  replaceChildren(...children) {
+    this.children = [];
+    children.forEach((child) => this.appendChild(child));
+  }
+
   setAttribute(name, value) {
     this.attributes.set(name, String(value));
     if (name.startsWith("data-")) {
@@ -273,6 +278,14 @@ class FakeIntersectionObserver {
 
 FakeIntersectionObserver.instances = [];
 
+function flushAsyncWork(turns = 30) {
+  let chain = Promise.resolve();
+  for (let i = 0; i < turns; i += 1) {
+    chain = chain.then(() => new Promise((resolve) => queueMicrotask(resolve)));
+  }
+  return chain;
+}
+
 async function loadApp({ fetchImpl, alertImpl } = {}) {
   const repoDir = path.resolve(__dirname, "..");
   const sourcePath = path.join(repoDir, "static", "app.js");
@@ -341,6 +354,31 @@ async function testPersistentCacheReusesRenderedHtmlAcrossMessageObjects() {
 
   const storageKeys = api.getStorageKeyInfo();
   assert.ok(localStorage.getItem(storageKeys.index), "expected markdown cache index to be persisted");
+  assert.equal(storageKeys.rendererVersion, "2026-05-27-1");
+}
+
+async function testClearMarkdownRenderCacheDropsPersistentAndInMemoryEntries() {
+  const { api, localStorage } = await loadApp();
+  let renderCalls = 0;
+  api.setCurrentSystem("windows");
+  api.setCurrentSource("codex");
+  api.setCurrentSession({ id: "session-clear-cache" });
+  api.setRenderMarkdown((text) => {
+    renderCalls += 1;
+    return `rendered:${renderCalls}:${text}`;
+  });
+
+  const msg = { message_index: 0, role: "assistant", kind: "message", text: "cache me" };
+  assert.equal(api.getMessageHtml(msg, false), "rendered:1:cache me");
+  assert.equal(api.getMessageHtml(msg, false), "rendered:1:cache me");
+  assert.equal(renderCalls, 1);
+
+  api.clearMarkdownRenderCache();
+
+  const storageKeys = api.getStorageKeyInfo();
+  assert.equal(localStorage.getItem(storageKeys.index), JSON.stringify({ entries: [] }));
+  assert.equal(api.getMessageHtml(msg, false), "rendered:2:cache me");
+  assert.equal(renderCalls, 2);
 }
 
 async function testPreviewAndFullModesUseDistinctPersistentEntries() {
@@ -431,12 +469,12 @@ async function testMessageBodiesRenderLazilyUntilVisible() {
   assert.deepEqual(renderedInputs, ["lazy body"]);
 }
 
-async function testMountedVirtualWindowBodiesFlushWithoutIntersectionObserver() {
+async function testMountedMessageBodiesFlushWithoutIntersectionObserver() {
   const { api } = await loadApp();
   const renderedInputs = [];
   api.setCurrentSystem("linux");
   api.setCurrentSource("codex");
-  api.setCurrentSession({ id: "session-virtual-lazy" });
+  api.setCurrentSession({ id: "session-mounted-lazy" });
   api.setExpandedMessageIndexes([]);
   api.setCurrentSessionSearchData("", []);
   api.setRenderMarkdown((text) => {
@@ -449,7 +487,7 @@ async function testMountedVirtualWindowBodiesFlushWithoutIntersectionObserver() 
     message_index: 41,
     role: "assistant",
     kind: "message",
-    text: "mounted virtual row",
+    text: "mounted message row",
   }, 41, "");
   const second = api.buildMessageElement({
     message_index: 42,
@@ -469,18 +507,9 @@ async function testMountedVirtualWindowBodiesFlushWithoutIntersectionObserver() 
   const flushed = api.flushPendingLazyMessageBodiesForRoot(root);
 
   assert.equal(flushed, 2);
-  assert.equal(firstBody.innerHTML, "rendered:mounted virtual row");
+  assert.equal(firstBody.innerHTML, "rendered:mounted message row");
   assert.equal(secondBody.innerHTML, "rendered:second mounted row");
-  assert.deepEqual(renderedInputs, ["mounted virtual row", "second mounted row"]);
-}
-
-async function testBrowseVirtualRefreshUsesInFlightRestoreScrollTop() {
-  const { api } = await loadApp();
-  api.setBrowseVirtualRenderScrollTop(20_000);
-  assert.equal(api.getBrowseVirtualRefreshScrollTop(0), 20_000);
-  assert.equal(api.getBrowseVirtualRefreshScrollTop(75), 20_000);
-  api.setBrowseVirtualRenderScrollTop(null);
-  assert.equal(api.getBrowseVirtualRefreshScrollTop(75), 75);
+  assert.deepEqual(renderedInputs, ["mounted message row", "second mounted row"]);
 }
 
 async function testLinuxResumeCommandsUseShellFriendlyVariants() {
@@ -507,13 +536,15 @@ async function testClaudeResumeCommandsAppendDangerousSkipPermissions() {
   );
 }
 
-async function testBrowseRenderPlanShowsLatestWindowOnly() {
+async function testBrowseRenderPlanUsesLoadedMessageWindow() {
   const { api } = await loadApp();
-  const messages = Array.from({ length: 450 }, (_, index) => ({
+  const messages = Array.from({ length: 200 }, (_, index) => ({
     role: "assistant",
     kind: "message",
-    text: `msg-${index}`,
+    text: `msg-${250 + index}`,
+    message_index: 250 + index,
   }));
+  api.setCurrentMessageWindow({ offset: 250, total: 450 });
   const plan = api.buildMessageRenderPlan(
     messages,
     {
@@ -532,6 +563,7 @@ async function testBrowseRenderPlanShowsLatestWindowOnly() {
   assert.equal(plan.totalVisible, 450);
   assert.equal(plan.hiddenBefore, 250);
   assert.equal(plan.items.length, 200);
+  assert.equal(plan.items[0].index, 250);
   assert.equal(plan.items[0].msg.text, "msg-250");
   assert.equal(plan.items.at(-1).msg.text, "msg-449");
 }
@@ -560,69 +592,14 @@ async function testBrowseRenderMountsLatestWindowByDefault() {
   messagesEl.clientHeight = 600;
   messagesEl.scrollTop = 999_999;
 
-  api.renderMessages(messages, { scrollToBottom: true });
+  api.setCurrentMessageWindow({ offset: 250, total: 450 });
+  api.renderMessages(messages.slice(250), { scrollToBottom: true });
 
   const indexes = collectRenderedMessageIndexes(messagesEl);
-  assert.ok(indexes.length > 0, "expected virtualized messages to mount");
+  assert.ok(indexes.length > 0, "expected messages to mount");
   assert.ok(!indexes.includes(0), "expected oldest messages to stay out of the default render window");
   assert.ok(indexes.includes(449), "expected newest message to be reachable in the default render window");
   assert.ok(indexes.every((index) => index >= 250), "expected default render window to use latest messages");
-}
-
-async function testBrowseWindowAnchorAdjustmentPreservesViewportWhenPrependingHistory() {
-  const { api } = await loadApp();
-  const messages = Array.from({ length: 450 }, (_, index) => ({
-    role: "assistant",
-    kind: "message",
-    text: `msg-${index}`,
-    ts_ms: index,
-  }));
-  const roleFilters = {
-    user: true,
-    assistant: true,
-    system: true,
-    developer: true,
-    tool: true,
-    other: true,
-  };
-
-  const adjustment = api.getBrowseWindowAnchorAdjustment(messages, roleFilters, 200, 400);
-
-  assert.equal(adjustment, 200 * 122);
-}
-
-async function testBrowseVirtualBottomScrollTopUsesEstimatedWindowHeight() {
-  const { api } = await loadApp();
-  const messages = Array.from({ length: 200 }, (_, index) => ({
-    msg: {
-      role: "assistant",
-      kind: "message",
-      text: `msg-${index}`,
-    },
-    index,
-  }));
-
-  assert.equal(api.getBrowseVirtualBottomScrollTop(messages, 600), (200 * 122) - 600);
-}
-
-async function testMessageViewportAnchorRestoresByMeasuredDomDelta() {
-  const { api } = await loadApp();
-  const messagesEl = api.getMessagesElement();
-  messagesEl.scrollTop = 500;
-  messagesEl.setBoundingClientRect({ top: 100, bottom: 700, height: 600 });
-
-  const row = new FakeElement("div");
-  row.dataset.messageIndex = "42";
-  row.setBoundingClientRect({ top: 180, bottom: 260, height: 80 });
-  messagesEl.appendChild(row);
-
-  const anchor = api.captureMessageViewportAnchor();
-  assert.equal(anchor.index, 42);
-  assert.equal(anchor.offsetTop, 80);
-
-  row.setBoundingClientRect({ top: 230, bottom: 310, height: 80 });
-  assert.equal(api.restoreMessageViewportAnchor(anchor), true);
-  assert.equal(messagesEl.scrollTop, 550);
 }
 
 async function testSearchRenderPlanOnlyReturnsMatchedWindow() {
@@ -655,35 +632,6 @@ async function testSearchRenderPlanOnlyReturnsMatchedWindow() {
   assert.equal(plan.items.at(-1).index, 199);
 }
 
-async function testVirtualWindowKeepsBoundedVisibleRangeWithSpacers() {
-  const { api } = await loadApp();
-  const heights = Array.from({ length: 1000 }, () => 100);
-  const plan = api.buildVirtualWindow(heights, 50_000, 600, 300);
-
-  assert.equal(plan.totalHeight, 100_000);
-  assert.ok(plan.start > 0, "expected a non-zero start range for deep scroll");
-  assert.ok(plan.end < heights.length, "expected range to stop before the full list");
-  assert.ok(plan.end - plan.start <= 16, "expected bounded DOM range with overscan");
-  assert.ok(plan.topSpacer > 0, "expected top spacer to preserve scroll height");
-  assert.ok(plan.bottomSpacer > 0, "expected bottom spacer to preserve scroll height");
-  assert.equal(
-    plan.topSpacer + plan.bottomSpacer + (plan.end - plan.start) * 100,
-    plan.totalHeight,
-  );
-}
-
-async function testVirtualWindowUsesMeasuredVariableHeights() {
-  const { api } = await loadApp();
-  const heights = [100, 100, 500, 100, 100, 100];
-  const plan = api.buildVirtualWindow(heights, 250, 120, 0);
-
-  assert.equal(plan.totalHeight, 1000);
-  assert.equal(plan.start, 2);
-  assert.equal(plan.end, 3);
-  assert.equal(plan.topSpacer, 200);
-  assert.equal(plan.bottomSpacer, 300);
-}
-
 async function testPinFailureDoesNotMutateCurrentSession() {
   const alerts = [];
   const { api } = await loadApp({
@@ -706,21 +654,16 @@ async function testPinFailureDoesNotMutateCurrentSession() {
 
 Promise.resolve()
   .then(testPersistentCacheReusesRenderedHtmlAcrossMessageObjects)
+  .then(testClearMarkdownRenderCacheDropsPersistentAndInMemoryEntries)
   .then(testPreviewAndFullModesUseDistinctPersistentEntries)
   .then(testSearchHitUsesExcerptInsteadOfAutoExpandingFullLongMessage)
   .then(testMessageBodiesRenderLazilyUntilVisible)
-  .then(testMountedVirtualWindowBodiesFlushWithoutIntersectionObserver)
-  .then(testBrowseVirtualRefreshUsesInFlightRestoreScrollTop)
+  .then(testMountedMessageBodiesFlushWithoutIntersectionObserver)
   .then(testLinuxResumeCommandsUseShellFriendlyVariants)
   .then(testClaudeResumeCommandsAppendDangerousSkipPermissions)
-  .then(testBrowseRenderPlanShowsLatestWindowOnly)
+  .then(testBrowseRenderPlanUsesLoadedMessageWindow)
   .then(testBrowseRenderMountsLatestWindowByDefault)
-  .then(testBrowseWindowAnchorAdjustmentPreservesViewportWhenPrependingHistory)
-  .then(testBrowseVirtualBottomScrollTopUsesEstimatedWindowHeight)
-  .then(testMessageViewportAnchorRestoresByMeasuredDomDelta)
   .then(testSearchRenderPlanOnlyReturnsMatchedWindow)
-  .then(testVirtualWindowKeepsBoundedVisibleRangeWithSpacers)
-  .then(testVirtualWindowUsesMeasuredVariableHeights)
   .then(testPinFailureDoesNotMutateCurrentSession)
   .catch((err) => {
   console.error(err);
