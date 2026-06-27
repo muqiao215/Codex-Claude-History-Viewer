@@ -3,3 +3,6 @@ __pycache__/
 *.sqlite-shm
 *.sqlite-wal
 .omo/
+.playwright-mcp/
+demo/.recall.db
+session-audit-plan..md

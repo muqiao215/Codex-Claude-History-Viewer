@@ -80,10 +80,10 @@ let sourceMeta = new Map();
 let availableSourcesBySystem = new Map([
   ["windows", ["codex", "claude", "openclaw"]],
   ["wsl", ["codex", "claude", "openclaw"]],
-  ["linux", ["codex", "claude", "openclaw"]],
+  ["linux", ["codex", "claude", "openclaw", "opencode"]],
 ]);
 const SYSTEM_ORDER = ["windows", "wsl", "linux"];
-const SOURCE_ORDER = ["codex", "claude", "openclaw", "hermes"];
+const SOURCE_ORDER = ["codex", "claude", "openclaw", "opencode", "hermes"];
 const LIST_RELOAD_DEBOUNCE_MS = 200;
 const SESSION_SEARCH_DEBOUNCE_MS = 220;
 const MESSAGE_RENDER_PAGE_SIZE = 200;
@@ -348,6 +348,7 @@ function toWslPath(value) {
 function getSourceLabel(source = currentSource) {
   if (source === "claude") return "Claude Code";
   if (source === "openclaw") return "OpenClaw";
+  if (source === "opencode") return "OpenCode";
   if (source === "hermes") return "Hermes";
   return "Codex";
 }
@@ -717,7 +718,7 @@ function applyStoredCodeTheme() {
 }
 
 function setSessionSort(sort, { persist } = { persist: false }) {
-  const allowed = new Set(["start", "last"]);
+  const allowed = new Set(["start", "last", "value"]);
   const next = allowed.has(sort) ? sort : "start";
   currentSessionSort = next;
   if (sessionSortEl) sessionSortEl.value = next;
@@ -1389,6 +1390,10 @@ function sortSessionsForSidebar(sessions) {
     const pinA = a?.pinned ? 1 : 0;
     const pinB = b?.pinned ? 1 : 0;
     if (pinB !== pinA) return pinB - pinA;
+    if (currentSessionSort === "value") {
+      const valDiff = (b?.value_score || 0) - (a?.value_score || 0);
+      if (valDiff) return valDiff;
+    }
     const keyDiff = sessionSortKeyMs(b) - sessionSortKeyMs(a);
     if (keyDiff) return keyDiff;
     const startDiff = (b?.start_ts_ms || 0) - (a?.start_ts_ms || 0);
@@ -1398,6 +1403,64 @@ function sortSessionsForSidebar(sessions) {
     return String(a?.id || "").localeCompare(String(b?.id || ""));
   });
   return list;
+}
+
+const OUTCOME_ICONS = {
+  completed: "\u2713",
+  partially_completed: "\u2713",
+  errored: "\u2717",
+  interrupted: "\u23F8",
+  incomplete: "\u2026",
+  exploration: "?",
+  unknown: "?",
+};
+
+function _fileCount(session) {
+  const ft = session?.files_touched;
+  if (!ft || typeof ft !== "object") return 0;
+  return (Array.isArray(ft.local) ? ft.local.length : 0)
+    + (Array.isArray(ft.remote) ? ft.remote.length : 0)
+    + (Array.isArray(ft.inferred) ? ft.inferred.length : 0);
+}
+
+function _toolCount(session) {
+  const tools = session?.tools_used;
+  if (!tools || typeof tools !== "object") return 0;
+  return Object.values(tools).reduce((sum, n) => sum + (Number(n) || 0), 0);
+}
+
+function _hasIntent(session, label) {
+  const intents = session?.command_intents;
+  return !!intents && typeof intents === "object" && Number(intents[label] || 0) > 0;
+}
+
+function _hasRemote(session) {
+  const rc = session?.remote_context;
+  if (!rc) return false;
+  if (Array.isArray(rc)) return rc.length > 0;
+  if (typeof rc === "object") return Object.keys(rc).length > 0;
+  return false;
+}
+
+function renderSessionBadges(session) {
+  const chips = [];
+  const files = _fileCount(session);
+  if (files > 0) chips.push(`<span class="audit-badge badge-files" title="${files} file(s) touched">\u{1F4C2} ${files}</span>`);
+  const tools = _toolCount(session);
+  if (tools > 0) chips.push(`<span class="audit-badge badge-tools" title="${tools} tool call(s)">\u{1F6E0} ${tools}</span>`);
+  if (_hasRemote(session)) chips.push(`<span class="audit-badge badge-remote" title="Remote commands detected">\u{1F310} Remote</span>`);
+  if (_hasIntent(session, "TEST")) chips.push(`<span class="audit-badge badge-test" title="Test commands">\u{1F9EA} Test</span>`);
+  if (_hasIntent(session, "DEPLOY")) chips.push(`<span class="audit-badge badge-deploy" title="Deploy commands">\u{1F680} Deploy</span>`);
+  if (_hasIntent(session, "DEBUG")) chips.push(`<span class="audit-badge badge-debug" title="Debug commands">\u{1F41E} Debug</span>`);
+  const friction = Number(session?.friction_score || 0);
+  if (friction > 0) chips.push(`<span class="audit-badge badge-friction" title="Friction score (errors + retries + interrupts)">\u26A0\uFE0F ${friction}</span>`);
+  const outcome = session?.outcome_signal || "unknown";
+  const icon = OUTCOME_ICONS[outcome] || "?";
+  chips.push(`<span class="audit-badge badge-outcome outcome-${escapeHtml(outcome)}" title="Outcome: ${escapeHtml(outcome)}">${icon}</span>`);
+  const value = Number(session?.value_score || 0);
+  chips.push(`<span class="audit-badge badge-value" title="Value score (0-100)">\u25C6 ${value}</span>`);
+  if (chips.length === 0) return "";
+  return `<div class="audit-badges">${chips.join("")}</div>`;
 }
 
 function formatSessionMeta(session) {
@@ -1429,10 +1492,11 @@ function renderSessions(sessions) {
     if (session.pinned) item.classList.add("pinned");
     if (currentSession?.id && currentSession.id === session.id) item.classList.add("active");
     item.dataset.sessionId = session.id;
-    const pinIcon = session.pinned ? '<span class="pin-icon">📌</span>' : '';
+    const pinIcon = session.pinned ? '<span class="pin-icon">\u{1F4CC}</span>' : '';
     item.innerHTML = `
       <div class="session-title">${pinIcon}${escapeHtml(session.title || "Session")}</div>
       <div class="session-meta">${escapeHtml(formatSessionMeta(session))}</div>
+      ${renderSessionBadges(session)}
     `;
     sessionListEl.appendChild(item);
   };
@@ -1446,14 +1510,17 @@ function renderSessions(sessions) {
   }
 
   let lastDate = "";
+  const useDateDividers = currentSessionSort !== "value";
   unpinned.forEach((session) => {
-    const date = formatDate(sessionSortKeyMs(session));
-    if (date && date !== lastDate) {
-      const divider = document.createElement("div");
-      divider.className = "date-divider";
-      divider.textContent = date;
-      sessionListEl.appendChild(divider);
-      lastDate = date;
+    if (useDateDividers) {
+      const date = formatDate(sessionSortKeyMs(session));
+      if (date && date !== lastDate) {
+        const divider = document.createElement("div");
+        divider.className = "date-divider";
+        divider.textContent = date;
+        sessionListEl.appendChild(divider);
+        lastDate = date;
+      }
     }
     appendSessionItem(session);
   });

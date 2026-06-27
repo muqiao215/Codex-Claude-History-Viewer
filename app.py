@@ -14,6 +14,14 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs, unquote
 
+from audit import (
+    AUDIT_VERSION,
+    build_audit_for_file,
+    deserialize_audit_summary,
+    patch_db_for_audit,
+    serialize_audit_fields,
+)
+
 MAX_SEARCH_CHARS = 2_000_000
 DEFAULT_LIMIT = 200
 MESSAGE_INLINE_FULL_THRESHOLD = 12_000
@@ -23,6 +31,33 @@ SEARCH_MATCH_CONTEXT_CHARS = 1_600
 SEARCH_MATCH_MAX_CHARS = 3_600
 DEFAULT_PAGE_LIMIT = 50
 SESSION_PREVIEW_CACHE_SIZE = 12
+
+
+def _neutral_audit_summary():
+    return {
+        "files_touched": [],
+        "tools_used": [],
+        "command_intents": [],
+        "remote_context": [],
+        "outcome_signal": "unknown",
+        "value_score": 0,
+        "friction_score": 0,
+        "action_density": 0.0,
+    }
+
+
+_AUDIT_RAW_JSON_KEYS = frozenset({
+    "files_touched_json",
+    "tool_summary_json",
+    "command_intents_json",
+    "remote_context_json",
+})
+
+
+def _strip_audit_raw_json(item):
+    for key in _AUDIT_RAW_JSON_KEYS:
+        item.pop(key, None)
+    return item
 
 
 def detect_runtime_system(os_name=None):
@@ -1262,6 +1297,7 @@ class Indexer:
                 cur.execute("ALTER TABLE sessions ADD COLUMN pinned INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+            patch_db_for_audit(self.conn)
             self.conn.commit()
 
     def maybe_update_index(self, max_age_seconds=None):
@@ -1281,7 +1317,7 @@ class Indexer:
         session_files = [p for p in self.sessions_dir.rglob("*.jsonl") if self._file_filter_fn(p)]
         with self.lock:
             existing_rows = self.conn.execute(
-                "SELECT id, file_path, mtime, parser_version, title, pinned FROM sessions"
+                "SELECT id, file_path, mtime, parser_version, title, pinned, audit_version FROM sessions"
             ).fetchall()
         existing_by_path = {str(row["file_path"]): row for row in existing_rows}
 
@@ -1298,6 +1334,7 @@ class Indexer:
                 and row["mtime"] is not None
                 and row["mtime"] >= mtime
                 and row["parser_version"] == self.parser_version
+                and row["audit_version"] == AUDIT_VERSION
             ):
                 continue
 
@@ -1373,6 +1410,42 @@ class Indexer:
                         ],
                     )
 
+                audit_payload = build_audit_for_file(Path(session["file_path"]), self.source, session_id_hint=session["id"])
+                if audit_payload is not None:
+                    fields = serialize_audit_fields(audit_payload)
+                    fields["audit_updated_at"] = int(time.time() * 1000)
+                    self.conn.execute(
+                        """
+                        UPDATE sessions
+                           SET files_touched_json = ?,
+                               tool_summary_json = ?,
+                               command_intents_json = ?,
+                               remote_context_json = ?,
+                               outcome_signal = ?,
+                               value_score = ?,
+                               friction_score = ?,
+                               action_density = ?,
+                               audit_status = ?,
+                               audit_updated_at = ?,
+                               audit_version = ?
+                         WHERE id = ?
+                        """,
+                        (
+                            fields["files_touched_json"],
+                            fields["tool_summary_json"],
+                            fields["command_intents_json"],
+                            fields["remote_context_json"],
+                            fields["outcome_signal"],
+                            fields["value_score"],
+                            fields["friction_score"],
+                            fields["action_density"],
+                            fields["audit_status"],
+                            fields["audit_updated_at"],
+                            fields["audit_version"],
+                            session["id"],
+                        ),
+                    )
+
             self.conn.commit()
 
     def backfill_local_title_overrides(self):
@@ -1410,13 +1483,19 @@ class Indexer:
             terms = [t for t in q.split() if t]
 
         sort_key = str(sort or "start").strip().lower()
-        if sort_key in ("last", "end", "updated", "update"):
+        if sort_key == "value":
+            order_clause = " ORDER BY COALESCE(pinned,0) DESC, value_score DESC, end_ts_ms DESC"
+        elif sort_key == "friction":
+            order_clause = " ORDER BY COALESCE(pinned,0) DESC, friction_score DESC, end_ts_ms DESC"
+        elif sort_key in ("last", "end", "updated", "update"):
             order_clause = " ORDER BY COALESCE(pinned,0) DESC, end_ts_ms DESC, start_ts_ms DESC"
         else:
             order_clause = " ORDER BY COALESCE(pinned,0) DESC, start_ts_ms DESC, end_ts_ms DESC"
 
         sql = (
-            "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned "
+            "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned, "
+            "files_touched_json, tool_summary_json, command_intents_json, remote_context_json, "
+            "outcome_signal, value_score, friction_score, action_density "
             "FROM sessions WHERE 1=1"
         )
         args = []
@@ -1438,14 +1517,22 @@ class Indexer:
 
         with self.lock:
             rows = self.conn.execute(sql, args).fetchall()
-        return [dict(row) for row in rows]
+        items = [dict(row) for row in rows]
+        for item in items:
+            item.update(deserialize_audit_summary(item))
+            _strip_audit_raw_json(item)
+        return items
 
     def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None):
         clean_limit, clean_offset = normalize_page_args(limit, offset)
         terms = [t for t in str(q or "").split() if t]
 
         sort_key = str(sort or "start").strip().lower()
-        if sort_key in ("last", "end", "updated", "update"):
+        if sort_key == "value":
+            order_clause = " ORDER BY value_score DESC, end_ts_ms DESC"
+        elif sort_key == "friction":
+            order_clause = " ORDER BY friction_score DESC, end_ts_ms DESC"
+        elif sort_key in ("last", "end", "updated", "update"):
             order_clause = " ORDER BY end_ts_ms DESC, start_ts_ms DESC"
         else:
             order_clause = " ORDER BY start_ts_ms DESC, end_ts_ms DESC"
@@ -1466,7 +1553,11 @@ class Indexer:
             like = f"%{term}%"
             args.extend([like, like, like])
 
-        select_sql = "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned FROM sessions"
+        select_sql = (
+            "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned, "
+            "files_touched_json, tool_summary_json, command_intents_json, remote_context_json, "
+            "outcome_signal, value_score, friction_score, action_density FROM sessions"
+        )
         pinned_rows = []
         with self.lock:
             if clean_offset == 0:
@@ -1480,8 +1571,13 @@ class Indexer:
                 [*args, clean_limit + 1, clean_offset],
             ).fetchall()
 
-        unpinned_items = [dict(row) for row in rows[:clean_limit]]
-        items = [dict(row) for row in pinned_rows] + unpinned_items
+        def _with_audit(row):
+            item = dict(row)
+            item.update(deserialize_audit_summary(item))
+            return _strip_audit_raw_json(item)
+
+        unpinned_items = [_with_audit(row) for row in rows[:clean_limit]]
+        items = [_with_audit(row) for row in pinned_rows] + unpinned_items
         has_more = len(rows) > clean_limit
         next_offset = clean_offset + len(unpinned_items) if has_more else None
         return {
@@ -1919,6 +2015,7 @@ class HermesStateIndexer:
             "message_count": int(row["message_count"] or 0),
             "cwd": str(row["source"] or "").strip() or "(unknown source)",
             "pinned": 0,
+            **_neutral_audit_summary(),
         }
 
     def _tool_use_text(self, row):
@@ -2301,6 +2398,470 @@ class HermesStateIndexer:
                     "hit_count": len(found),
                     "char_count": serialized["char_count"],
                     "is_truncated": serialized["char_count"] > MESSAGE_INLINE_FULL_THRESHOLD,
+                    "excerpt_text": excerpt["text"],
+                    "excerpt_start": excerpt["start"],
+                    "excerpt_end": excerpt["end"],
+                    "excerpt_has_more_before": excerpt["has_more_before"],
+                    "excerpt_has_more_after": excerpt["has_more_after"],
+                })
+
+        result["match_count"] = total_hits
+        result["message_match_count"] = total_message_matches
+        result["matches"] = matches
+        return result
+
+    def rename_session(self, session_id, title):
+        return False
+
+    def archive_session(self, session_id, archived_dir):
+        return False, "unsupported"
+
+    def delete_project_sessions(self, project, deleted_dir):
+        return False, "unsupported", 0, None
+
+    def cleanup_weak_sessions(self, deleted_dir, min_user_messages=5, project=None):
+        return False, "unsupported", 0, None
+
+    def pin_session(self, session_id, pinned):
+        return False
+
+
+class OpenCodeIndexer:
+    """Read-only indexer for the OpenCode local SQLite state DB.
+
+    Schema (relevant tables in ``~/.local/share/opencode/opencode.db``):
+      - ``session``: id, project_id, directory (cwd), title, time_created (ms),
+        time_updated, agent, model (JSON), cost, tokens_*
+      - ``message``: id, session_id, time_created, data (JSON envelope)
+      - ``part``:    id, message_id, session_id, time_created,
+        data (JSON; type ∈ text|reasoning|tool|step-start|step-finish|patch)
+      - ``project``: id, worktree, name, ...
+    """
+
+    GLOBAL_PROJECT_ID = "global"
+
+    def __init__(self, db_path: Path):
+        self.source = "opencode"
+        self.db_path = Path(db_path).expanduser()
+        self.conn = sqlite3.connect(
+            f"file:{self.db_path}?mode=ro",
+            uri=True,
+            check_same_thread=False,
+            timeout=30.0,
+        )
+        self.conn.row_factory = sqlite3.Row
+        self.lock = threading.RLock()
+        self._session_preview_cache = OrderedDict()
+
+    def _remember_session_preview_cache(self, session_id, payload):
+        key = str(session_id or "")
+        if not key:
+            return
+        self._session_preview_cache[key] = payload
+        self._session_preview_cache.move_to_end(key)
+        while len(self._session_preview_cache) > SESSION_PREVIEW_CACHE_SIZE:
+            self._session_preview_cache.popitem(last=False)
+
+    def maybe_update_index(self, max_age_seconds=None):
+        return
+
+    def scan_sessions(self):
+        return
+
+    def _project_value(self):
+        return "COALESCE(NULLIF(s.directory, ''), '(unknown directory)')"
+
+    def _project_value_no_alias(self):
+        return "COALESCE(NULLIF(directory, ''), '(unknown directory)')"
+
+    def _session_title(self, row):
+        title = str(row["title"] or "").strip()
+        if title:
+            return title[:80]
+        model = ""
+        raw_model = row["model"]
+        if raw_model:
+            try:
+                model_obj = json.loads(raw_model) if isinstance(raw_model, str) else raw_model
+                if isinstance(model_obj, dict):
+                    model = str(model_obj.get("id") or model_obj.get("modelID") or "").strip()
+            except (json.JSONDecodeError, TypeError):
+                model = ""
+        model = model or "OpenCode"
+        return f"{model} - {str(row['id'])[:8]}"
+
+    def _serialize_session_row(self, row):
+        cwd = str(row["directory"] or "").strip() or "(unknown directory)"
+        return {
+            "id": row["id"],
+            "start_ts_ms": parse_ts(row["time_created"]),
+            "end_ts_ms": parse_ts(row["time_updated"]),
+            "title": self._session_title(row),
+            "message_count": int(row["message_count"] or 0),
+            "cwd": cwd,
+            "pinned": 0,
+            **_neutral_audit_summary(),
+        }
+
+    @staticmethod
+    def _parse_data(raw):
+        if raw is None:
+            return None
+        if isinstance(raw, (dict, list)):
+            return raw
+        if isinstance(raw, (bytes, bytearray)):
+            try:
+                raw = raw.decode("utf-8", errors="replace")
+            except Exception:
+                return None
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _format_tool_text(tool_name, state):
+        name = str(tool_name or "").strip() or "tool"
+        lines = [f"Tool use: {name}"]
+        if isinstance(state, dict):
+            arguments = state.get("input")
+            if arguments not in (None, ""):
+                lines.append("Input:")
+                if isinstance(arguments, str):
+                    try:
+                        parsed = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        parsed = None
+                    if parsed is not None:
+                        lines.append("```json")
+                        lines.append(json.dumps(parsed, ensure_ascii=False, indent=2))
+                        lines.append("```")
+                    else:
+                        lines.append(arguments)
+                else:
+                    lines.append("```json")
+                    lines.append(json.dumps(arguments, ensure_ascii=False, indent=2))
+                    lines.append("```")
+            output = state.get("output")
+            if output not in (None, ""):
+                lines.append("Output:")
+                if isinstance(output, str):
+                    lines.append(output)
+                else:
+                    try:
+                        lines.append(json.dumps(output, ensure_ascii=False, indent=2))
+                    except (TypeError, ValueError):
+                        lines.append(str(output))
+            metadata = state.get("metadata")
+            if isinstance(metadata, dict) and metadata:
+                error = metadata.get("error")
+                if error:
+                    lines.append(f"Error: {error}")
+        return "\n".join(lines).strip()
+
+    @staticmethod
+    def _flatten_part(message_role, part_type, part_data, part_time_ms):
+        """Flatten one part into (role, kind, text, ts_ms); return None to skip."""
+        role = str(message_role or "").strip() or "assistant"
+        text = ""
+        kind = "message"
+
+        if part_type == "text":
+            text = str(part_data.get("text") or "")
+            kind = "message"
+        elif part_type == "reasoning":
+            text = str(part_data.get("text") or "")
+            kind = "reasoning_summary"
+        elif part_type == "tool":
+            tool_name = part_data.get("tool") or ""
+            state = part_data.get("state") or {}
+            status = str(state.get("status") or "").strip().lower() if isinstance(state, dict) else ""
+            text = OpenCodeIndexer._format_tool_text(tool_name, state)
+            if status in ("pending", "running"):
+                return ("assistant", "tool_use", text, part_time_ms)
+            return ("tool", "tool_result", text, part_time_ms)
+        else:
+            return None  # step-start / step-finish / patch / unknown
+
+        if not text:
+            return None
+        return (role, kind, text, part_time_ms)
+
+    def _load_flat_messages(self, session_id):
+        """Load + flatten all parts for a session, in time order."""
+        with self.lock:
+            rows = self.conn.execute(
+                """
+                SELECT
+                    p.id            AS part_id,
+                    p.message_id    AS message_id,
+                    p.time_created  AS part_ts_ms,
+                    p.data          AS part_data,
+                    m.data          AS message_data,
+                    m.time_created  AS message_ts_ms
+                FROM part p
+                JOIN message m ON m.id = p.message_id
+                WHERE p.session_id = ?
+                ORDER BY m.time_created ASC, p.time_created ASC, p.id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+
+        flat = []
+        for row in rows:
+            message_data = self._parse_data(row["message_data"])
+            if not message_data:
+                continue
+            message_role = message_data.get("role") or "assistant"
+            part_data = self._parse_data(row["part_data"]) or {}
+            part_type = str(part_data.get("type") or "").strip()
+            if not part_type:
+                continue
+            part_time_ms = parse_ts(row["part_ts_ms"]) or parse_ts(row["message_ts_ms"])
+            flat_part = self._flatten_part(message_role, part_type, part_data, part_time_ms)
+            if flat_part is None:
+                continue
+            role, kind, text, ts_ms = flat_part
+            flat.append({"ts_ms": ts_ms, "role": role, "kind": kind, "text": text})
+        return flat
+
+    def _serialize_flat_message(self, flat_msg, message_index, include_full_text=False):
+        text = str(flat_msg.get("text") or "")
+        text, char_count, is_truncated = normalize_message_payload(
+            text,
+            include_full_text=include_full_text,
+        )
+        return {
+            "message_index": int(message_index),
+            "ts_ms": flat_msg.get("ts_ms"),
+            "role": str(flat_msg.get("role") or "assistant"),
+            "kind": str(flat_msg.get("kind") or "message"),
+            "text": text,
+            "char_count": char_count,
+            "is_truncated": bool(is_truncated),
+        }
+
+    def _session_lookup(self, session_id):
+        return self.conn.execute(
+            """
+            SELECT id, project_id, parent_id, slug, directory, title, version,
+                   share_url, summary_additions, summary_deletions, summary_files,
+                   summary_diffs, time_created, time_updated, agent, model,
+                   cost, tokens_input, tokens_output, tokens_reasoning,
+                   tokens_cache_read, tokens_cache_write,
+                   (SELECT COUNT(*) FROM message m WHERE m.session_id = session.id) AS message_count
+            FROM session
+            WHERE id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+
+    def _session_message_count(self, session_id):
+        """Count of flat (rendered) messages for a session."""
+        flat = self._load_flat_messages(session_id)
+        return len(flat)
+
+    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None):
+        clean_limit, clean_offset = normalize_page_args(limit, offset)
+        terms = [t for t in str(q or "").split() if t]
+
+        sql = (
+            "SELECT s.id, s.project_id, s.directory, s.title, s.time_created, "
+            "s.time_updated, s.model, s.agent, "
+            "(SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) AS message_count "
+            "FROM session s WHERE 1=1"
+        )
+        args = []
+        if start_ms is not None:
+            sql += " AND s.time_created >= ?"
+            args.append(int(start_ms))
+        if end_ms is not None:
+            sql += " AND s.time_created <= ?"
+            args.append(int(end_ms))
+        if cwd:
+            sql += f" AND {self._project_value()} = ?"
+            args.append(str(cwd))
+        for term in terms:
+            like = f"%{term}%"
+            sql += (
+                " AND ("
+                "COALESCE(s.title, '') LIKE ? OR COALESCE(s.directory, '') LIKE ? "
+                "OR COALESCE(s.agent, '') LIKE ? OR COALESCE(s.model, '') LIKE ? "
+                "OR s.id LIKE ? "
+                "OR EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id AND m.data LIKE ?) "
+                "OR EXISTS (SELECT 1 FROM part p WHERE p.session_id = s.id AND p.data LIKE ?)"
+                ")"
+            )
+            args.extend([like, like, like, like, like, like, like])
+
+        sort_key = str(sort or "start").strip().lower()
+        if sort_key in ("last", "end", "updated", "update"):
+            sql += " ORDER BY s.time_updated DESC, s.time_created DESC"
+        else:
+            sql += " ORDER BY s.time_created DESC, s.time_updated DESC"
+        sql += " LIMIT ? OFFSET ?"
+        args.extend([clean_limit + 1, clean_offset])
+
+        with self.lock:
+            rows = self.conn.execute(sql, args).fetchall()
+
+        items = [self._serialize_session_row(row) for row in rows[:clean_limit]]
+        has_more = len(rows) > clean_limit
+        next_offset = clean_offset + len(items) if has_more else None
+        return {
+            "items": items,
+            "limit": clean_limit,
+            "offset": clean_offset,
+            "has_more": has_more,
+            "next_offset": next_offset,
+        }
+
+    def list_projects_page(self, q=None, limit=DEFAULT_PAGE_LIMIT, offset=0):
+        clean_limit, clean_offset = normalize_page_args(limit, offset)
+        project_expr = self._project_value_no_alias()
+        sql = (
+            f"SELECT {project_expr} AS project, COUNT(*) AS session_count, "
+            "MAX(time_created) AS last_started_at "
+            "FROM session WHERE 1=1 "
+            f"AND (project_id IS NULL OR project_id != '{self.GLOBAL_PROJECT_ID}')"
+        )
+        args = []
+        if q:
+            sql += f" AND {project_expr} LIKE ?"
+            args.append(f"%{q}%")
+        sql += " GROUP BY project ORDER BY last_started_at DESC LIMIT ? OFFSET ?"
+        args.extend([clean_limit + 1, clean_offset])
+
+        with self.lock:
+            rows = self.conn.execute(sql, args).fetchall()
+
+        items = [
+            {
+                "project": row["project"],
+                "session_count": int(row["session_count"] or 0),
+                "last_ts_ms": parse_ts(row["last_started_at"]),
+            }
+            for row in rows[:clean_limit]
+        ]
+        has_more = len(rows) > clean_limit
+        next_offset = clean_offset + len(items) if has_more else None
+        return {
+            "items": items,
+            "limit": clean_limit,
+            "offset": clean_offset,
+            "has_more": has_more,
+            "next_offset": next_offset,
+        }
+
+    def get_session_metadata(self, session_id):
+        with self.lock:
+            session = self._session_lookup(session_id)
+            if not session:
+                return None
+            payload = self._serialize_session_row(session)
+            payload["message_total"] = self._session_message_count(session_id)
+            return payload
+
+    def get_session_messages_page(self, session_id, offset=0, limit=DEFAULT_LIMIT):
+        clean_limit, clean_offset = normalize_page_args(
+            limit, offset, default_limit=DEFAULT_LIMIT, max_limit=DEFAULT_LIMIT
+        )
+        with self.lock:
+            session = self._session_lookup(session_id)
+            if not session:
+                return None
+            flat = self._load_flat_messages(session_id)
+        total = len(flat)
+        window = flat[clean_offset:clean_offset + clean_limit]
+        return {
+            "messages": [
+                self._serialize_flat_message(msg, clean_offset + idx)
+                for idx, msg in enumerate(window)
+            ],
+            "offset": clean_offset,
+            "limit": clean_limit,
+            "total": total,
+        }
+
+    def get_session(self, session_id, include_messages=True):
+        session = self.get_session_metadata(session_id)
+        if not session:
+            return None
+        payload = {"session": session}
+        if include_messages:
+            cached = self._session_preview_cache.get(str(session_id))
+            if cached is not None:
+                self._session_preview_cache.move_to_end(str(session_id))
+                return cached
+            page = self.get_session_messages_page(session_id, offset=0, limit=DEFAULT_LIMIT)
+            if page is None:
+                return None
+            payload["messages"] = page["messages"]
+            self._remember_session_preview_cache(session_id, payload)
+        return payload
+
+    def get_session_message(self, session_id, message_index):
+        try:
+            offset = int(message_index)
+        except (TypeError, ValueError):
+            return None
+        if offset < 0:
+            return None
+        with self.lock:
+            session = self._session_lookup(session_id)
+            if not session:
+                return None
+            flat = self._load_flat_messages(session_id)
+        if offset >= len(flat):
+            return None
+        return self._serialize_flat_message(flat[offset], offset, include_full_text=True)
+
+    def search_session_messages(self, session_id, query, limit=None):
+        term = str(query or "").strip()
+        result = {
+            "query": term,
+            "match_count": 0,
+            "message_match_count": 0,
+            "matches": [],
+        }
+        if not term:
+            return result
+
+        pattern = re.compile(re.escape(term), re.IGNORECASE)
+        with self.lock:
+            session = self._session_lookup(session_id)
+            if not session:
+                return None
+            flat = self._load_flat_messages(session_id)
+
+        try:
+            clean_limit = int(limit) if limit is not None else None
+        except (TypeError, ValueError):
+            clean_limit = None
+        if clean_limit is not None and clean_limit <= 0:
+            clean_limit = None
+
+        matches = []
+        total_hits = 0
+        total_message_matches = 0
+        for idx, msg in enumerate(flat):
+            text = str(msg.get("text") or "")
+            found = list(pattern.finditer(text))
+            if not found:
+                continue
+            total_hits += len(found)
+            total_message_matches += 1
+            if clean_limit is None or len(matches) < clean_limit:
+                excerpt = build_search_excerpt_text(text, found[0].start(), found[0].end())
+                matches.append({
+                    "message_index": idx,
+                    "ts_ms": msg.get("ts_ms"),
+                    "role": msg.get("role"),
+                    "kind": msg.get("kind"),
+                    "hit_count": len(found),
+                    "char_count": len(text),
+                    "is_truncated": len(text) > MESSAGE_INLINE_FULL_THRESHOLD,
                     "excerpt_text": excerpt["text"],
                     "excerpt_start": excerpt["start"],
                     "excerpt_end": excerpt["end"],
@@ -2746,6 +3307,7 @@ def main():
     parser.add_argument("--claude-dir", default=os.path.expanduser("~/.claude"))
     parser.add_argument("--openclaw-dir", default=os.path.expanduser("~/.openclaw"))
     parser.add_argument("--hermes-state-db", default=None)
+    parser.add_argument("--opencode-state-db", default=None)
     parser.add_argument("--wsl-distro", default="Ubuntu-22.04")
     parser.add_argument("--wsl-user", default="muqiao")
     parser.add_argument("--wsl-codex-dir", default=None)
@@ -2776,6 +3338,17 @@ def main():
                     Path("~/.hermes/state.db").expanduser(),
                 ]
             )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def detect_opencode_state_db(explicit_path):
+        candidates = []
+        if explicit_path:
+            candidates.append(Path(explicit_path).expanduser())
+        if runtime_system != "windows":
+            candidates.append(Path("~/.local/share/opencode/opencode.db").expanduser())
         for candidate in candidates:
             if candidate.exists():
                 return candidate
@@ -2849,6 +3422,21 @@ def main():
             parse_codex_session_file,
             1,
             indexer_factory=lambda: HermesStateIndexer(hermes_state_db),
+            read_only=True,
+        )
+
+    opencode_state_db = detect_opencode_state_db(args.opencode_state_db)
+    if opencode_state_db:
+        opencode_root = opencode_state_db.parent
+        register_source(
+            runtime_system,
+            "opencode",
+            opencode_root,
+            opencode_root,
+            "index_opencode.sqlite",
+            parse_codex_session_file,
+            1,
+            indexer_factory=lambda: OpenCodeIndexer(opencode_state_db),
             read_only=True,
         )
 

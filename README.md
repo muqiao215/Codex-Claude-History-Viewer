@@ -1,11 +1,12 @@
 # Codex & Claude History Viewer
 
-Local-first, dependency-free web viewer for **Codex CLI**, **Claude Code**, **OpenClaw**, and **Hermes** session history.
+Local-first, dependency-free web viewer for **Codex CLI**, **Claude Code**, **OpenClaw**, **OpenCode**, and **Hermes** session history.
 
 - Browse sessions and projects (work dirs)
 - Search sessions by keyword + date range
 - Filter messages by role, and search within a session (highlight + next/prev)
-- Sort sidebar by **start time** or **last activity**
+- Sort sidebar by **start time**, **last activity**, or **value signal**
+- Audit badges per session: files touched, tool count, remote/test/deploy/debug activity, friction, outcome, value score
 - Highlight interruptions and common error outputs
 
 > Not affiliated with OpenAI or Anthropic. “Codex” and “Claude” are trademarks of their respective owners.
@@ -50,6 +51,7 @@ By default it reads:
 - Codex logs: `~/.codex/sessions`
 - Claude logs: `~/.claude/projects`
 - OpenClaw logs: `~/.openclaw/agents`
+- OpenCode state DB: auto-detected from `~/.local/share/opencode/opencode.db`
 - Hermes state DB: auto-detected from `~/.hermes/state.db` or `../hermes-agent/.hermes-home/state.db`
 
 Indexes (SQLite) are stored next to `app.py` (the repo folder) unless you set `--data-dir`.
@@ -92,6 +94,9 @@ python3 app.py --host 0.0.0.0 --port 8787
 # Custom log locations (these are the *base dirs* that contain `sessions/` and `projects/`)
 python3 app.py --codex-dir ~/.codex --claude-dir ~/.claude --openclaw-dir ~/.openclaw
 
+# Explicit OpenCode state DB (optional; otherwise auto-detected)
+python3 app.py --opencode-state-db ~/.local/share/opencode/opencode.db
+
 # Explicit Hermes DB path (optional; otherwise auto-detected on Linux)
 python3 app.py --hermes-state-db ~/.hermes/state.db
 
@@ -108,6 +113,7 @@ python3 app.py \
   --codex-dir ~/.codex \
   --claude-dir ~/.claude \
   --openclaw-dir ~/.openclaw \
+  --opencode-state-db ~/.local/share/opencode/opencode.db \
   --data-dir ~/.cache/cchv \
   --host 127.0.0.1 \
   --port 8787
@@ -141,13 +147,15 @@ That writes:
 ## Using the UI
 
 - **System**: switch between the runtime systems that are actually available.
-- **Source**: switch between Codex / Claude Code / OpenClaw / Hermes history.
+- **Source**: switch between Codex / Claude Code / OpenClaw / OpenCode / Hermes history. OpenCode and Hermes are read-only sources backed by their own SQLite state DBs.
 - **Browse**:
   - **Sessions**: list individual sessions.
-  - **Projects**: group sessions by working directory (cwd), or by Hermes source for Hermes sessions.
+  - **Projects**: group sessions by working directory (cwd), or by Hermes/OpenCode source for those sources.
 - **Sidebar sort**: top-right dropdown in the sessions list:
   - `Start time` (default)
   - `Last activity`
+  - `Value signal` — sessions with higher audit value score first (only meaningful for JSONL-backed sources: Codex / Claude Code / OpenClaw)
+- **Audit badges** (JSONL sources only): each session row shows compact chips summarising what the agent actually did — files touched, tool calls, remote/test/deploy/debug activity, friction (errors + retries + interrupts), outcome (✓ completed / ✗ errored / ⏸ interrupted / ? unknown), and a 0–100 value score. Hover any chip for details.
 - **Roles**: toggle user/assistant/system/developer/tool/other.
 - **Search**
   - Left panel: keyword search across sessions + optional date range.

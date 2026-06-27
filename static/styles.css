@@ -511,6 +511,46 @@ body.is-resizing {
   color: var(--muted);
 }
 
+.audit-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.audit-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 16px;
+  border-radius: 9px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.audit-badge.badge-files { color: var(--accent, #4a9); }
+.audit-badge.badge-tools { color: var(--accent, #4a9); }
+.audit-badge.badge-value { background: var(--accent-bg, rgba(74,170,153,.12)); border-color: var(--accent, #4a9); color: var(--accent, #4a9); }
+.audit-badge.badge-friction { color: #c44; }
+.audit-badge.badge-remote { color: #96c; }
+.audit-badge.badge-test { color: #4a9; }
+.audit-badge.badge-deploy { color: #c72; }
+.audit-badge.badge-debug { color: #e90; }
+
+.audit-badge.badge-outcome { font-weight: 700; }
+.audit-badge.outcome-completed,
+.audit-badge.outcome-partially_completed { color: #4a9; }
+.audit-badge.outcome-errored { color: #c44; }
+.audit-badge.outcome-interrupted { color: #e90; }
+.audit-badge.outcome-unknown,
+.audit-badge.outcome-incomplete,
+.audit-badge.outcome-exploration { color: var(--muted); }
+
 .date-divider {
   font-size: 13px;
   font-weight: 700;
