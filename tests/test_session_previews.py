@@ -87,7 +87,7 @@ class SessionPreviewTests(unittest.TestCase):
             self.indexer.conn.commit()
 
     def test_get_session_returns_preview_for_long_messages(self):
-        data = self.indexer.get_session("session-1")
+        data = self.indexer.get_session("session-1", include_messages=True)
 
         self.assertIsNotNone(data)
         self.assertEqual(len(data["messages"]), 2)
@@ -97,6 +97,24 @@ class SessionPreviewTests(unittest.TestCase):
         self.assertEqual(data["messages"][1]["message_index"], 1)
         self.assertGreater(data["messages"][1]["char_count"], app.MESSAGE_INLINE_FULL_THRESHOLD)
         self.assertLess(len(data["messages"][1]["text"]), data["messages"][1]["char_count"])
+
+    def test_get_session_metadata_omits_messages_and_counts_actual_rows(self):
+        data = self.indexer.get_session("session-1", include_messages=False)
+
+        self.assertIsNotNone(data)
+        self.assertNotIn("messages", data)
+        self.assertEqual(data["session"]["message_total"], 2)
+
+    def test_get_session_messages_page_returns_absolute_indexes(self):
+        page = self.indexer.get_session_messages_page("session-1", offset=1, limit=1)
+
+        self.assertIsNotNone(page)
+        self.assertEqual(page["offset"], 1)
+        self.assertEqual(page["limit"], 1)
+        self.assertEqual(page["total"], 2)
+        self.assertEqual(len(page["messages"]), 1)
+        self.assertEqual(page["messages"][0]["message_index"], 1)
+        self.assertTrue(page["messages"][0]["is_truncated"])
 
     def test_get_session_message_returns_full_text_for_specific_index(self):
         message = self.indexer.get_session_message("session-1", 1)
@@ -146,6 +164,78 @@ class SessionPreviewTests(unittest.TestCase):
         self.assertEqual(result["message_match_count"], 0)
         self.assertEqual(result["match_count"], 0)
         self.assertEqual(result["matches"], [])
+
+    def test_codex_parser_keeps_unknown_payload_as_raw_json(self):
+        path = self.sessions_dir / "unknown.jsonl"
+        path.write_text(
+            "\n".join([
+                '{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","payload":{"id":"raw-1","cwd":"/tmp/demo"}}',
+                '{"timestamp":"2026-01-01T00:00:01Z","type":"response_item","payload":{"type":"future_payload","value":{"x":1}}}',
+            ]),
+            encoding="utf-8",
+        )
+
+        parsed = app.parse_codex_session_file(path)
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["id"], "raw-1")
+        self.assertEqual(len(parsed["messages"]), 1)
+        self.assertEqual(parsed["messages"][0]["role"], "other")
+        self.assertEqual(parsed["messages"][0]["kind"], "raw_json:response_item:future_payload")
+        self.assertIn('"future_payload"', parsed["messages"][0]["text"])
+
+    def test_large_session_message_paging_and_search_outside_loaded_window(self):
+        with self.indexer.lock:
+            self.indexer.conn.execute(
+                """
+                INSERT INTO sessions
+                (id, file_path, start_ts_ms, end_ts_ms, cwd, title, message_count, mtime, search_blob, parser_version, pinned)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "large-session",
+                    str(self.sessions_dir / "large-session.jsonl"),
+                    1,
+                    5000,
+                    str(self.sessions_dir),
+                    "Large session",
+                    5000,
+                    0.0,
+                    "",
+                    1,
+                    0,
+                ),
+            )
+            rows = [
+                (
+                    "large-session",
+                    idx,
+                    "assistant",
+                    "tool_result" if idx == 123 else "message",
+                    ("x" * 500_000) if idx == 123 else (f"message {idx} needle-outside-window" if idx == 42 else f"message {idx}"),
+                )
+                for idx in range(5000)
+            ]
+            self.indexer.conn.executemany(
+                "INSERT INTO messages (session_id, ts_ms, role, kind, text) VALUES (?, ?, ?, ?, ?)",
+                rows,
+            )
+            self.indexer.conn.commit()
+
+        page = self.indexer.get_session_messages_page("large-session", offset=4800, limit=200)
+        self.assertEqual(page["total"], 5000)
+        self.assertEqual(len(page["messages"]), 200)
+        self.assertEqual(page["messages"][0]["message_index"], 4800)
+        self.assertEqual(page["messages"][-1]["message_index"], 4999)
+
+        huge = self.indexer.get_session_messages_page("large-session", offset=123, limit=1)["messages"][0]
+        self.assertTrue(huge["is_truncated"])
+        self.assertEqual(huge["char_count"], 500_000)
+        self.assertLess(len(huge["text"]), huge["char_count"])
+
+        result = self.indexer.search_session_messages("large-session", "needle-outside-window", limit=10)
+        self.assertEqual(result["message_match_count"], 1)
+        self.assertEqual(result["matches"][0]["message_index"], 42)
 
 
 class ListPaginationTests(unittest.TestCase):
@@ -413,7 +503,7 @@ class HermesStateIndexerTests(unittest.TestCase):
         self.assertIn("glm-5.1", session["title"])
 
     def test_get_session_maps_tool_rows_and_reasoning_rows(self):
-        data = self.indexer.get_session("sess-1")
+        data = self.indexer.get_session("sess-1", include_messages=True)
 
         self.assertIsNotNone(data)
         self.assertEqual(len(data["messages"]), 4)
@@ -424,6 +514,15 @@ class HermesStateIndexerTests(unittest.TestCase):
         self.assertEqual(data["messages"][2]["kind"], "tool_result")
         self.assertEqual(data["messages"][3]["kind"], "reasoning_summary")
         self.assertEqual(data["messages"][3]["text"], "Reasoning only")
+
+    def test_hermes_session_messages_page_returns_absolute_indexes(self):
+        page = self.indexer.get_session_messages_page("sess-1", offset=1, limit=2)
+
+        self.assertIsNotNone(page)
+        self.assertEqual(page["offset"], 1)
+        self.assertEqual(page["total"], 4)
+        self.assertEqual([item["message_index"] for item in page["messages"]], [1, 2])
+        self.assertEqual(page["messages"][0]["kind"], "tool_use")
 
     def test_search_session_messages_matches_hermes_content(self):
         data = self.indexer.search_session_messages("sess-1", "needle")

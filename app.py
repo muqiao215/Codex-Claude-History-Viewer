@@ -236,6 +236,19 @@ def normalize_page_args(limit, offset, default_limit=DEFAULT_PAGE_LIMIT, max_lim
     return clean_limit, clean_offset
 
 
+def add_raw_message(messages, ts_ms, role, obj, reason="unhandled"):
+    try:
+        raw = json.dumps(obj, ensure_ascii=False, indent=2)
+    except Exception:
+        raw = repr(obj)
+    messages.append({
+        "ts_ms": ts_ms,
+        "role": role or "other",
+        "kind": f"raw_json:{reason}",
+        "text": f"```json\n{raw}\n```",
+    })
+
+
 def parse_date_param(value, end=False):
     if not value:
         return None
@@ -457,6 +470,12 @@ def parse_codex_session_file(path: Path):
                 try:
                     obj = json.loads(line)
                 except Exception:
+                    messages.append({
+                        "ts_ms": start_ts_ms or end_ts_ms or 0,
+                        "role": "other",
+                        "kind": "raw_json:malformed_line",
+                        "text": f"```\n{line.rstrip()}\n```",
+                    })
                     continue
 
                 ts_ms = parse_ts(obj.get("timestamp"))
@@ -556,6 +575,8 @@ def parse_codex_session_file(path: Path):
                                 "text": text,
                             })
                             add_search(text)
+                    else:
+                        add_raw_message(messages, ts_ms, "other", obj, reason=f"response_item:{payload_type or 'unknown'}")
                 elif obj_type == "event_msg":
                     payload = obj.get("payload", {})
                     if payload.get("type") == "agent_reasoning":
@@ -568,6 +589,10 @@ def parse_codex_session_file(path: Path):
                                 "text": text,
                             })
                             add_search(text)
+                    else:
+                        add_raw_message(messages, ts_ms, "other", obj, reason=f"event_msg:{payload.get('type') or 'unknown'}")
+                else:
+                    add_raw_message(messages, ts_ms, "other", obj, reason=f"type:{obj_type or 'unknown'}")
     except FileNotFoundError:
         return None
 
@@ -786,6 +811,7 @@ def parse_claude_session_file(path: Path):
                 try:
                     obj = json.loads(line)
                 except Exception:
+                    add_message(start_ts_ms or end_ts_ms or 0, "other", "raw_json:malformed_line", f"```\n{line.rstrip()}\n```", count_for_stats=False)
                     continue
 
                 if not session_id and isinstance(obj, dict) and isinstance(obj.get("sessionId"), str):
@@ -815,6 +841,7 @@ def parse_claude_session_file(path: Path):
 
                 msg = obj.get("message")
                 if not isinstance(msg, dict):
+                    add_raw_message(messages, ts_ms, "other", obj, reason=f"type:{obj_type or 'missing_message'}")
                     continue
 
                 role = msg.get("role") or obj_type
@@ -837,6 +864,8 @@ def parse_claude_session_file(path: Path):
                             text = _claude_extract_text_item(item)
                             if text:
                                 add_message(ts_ms, "user", "message", text.strip(), count_for_stats=True)
+                            else:
+                                add_raw_message(messages, ts_ms, "other", item, reason=f"claude_user_item:{item_type or 'unknown'}")
                     continue
 
                 if role == "assistant":
@@ -866,7 +895,10 @@ def parse_claude_session_file(path: Path):
                             text = _claude_extract_text_item(item)
                             if text:
                                 add_message(ts_ms, "assistant", "message", text.strip(), count_for_stats=True)
+                            else:
+                                add_raw_message(messages, ts_ms, "other", item, reason=f"claude_assistant_item:{item_type or 'unknown'}")
                     continue
+                add_raw_message(messages, ts_ms, role or "other", obj, reason=f"claude_role:{role or 'unknown'}")
     except FileNotFoundError:
         return None
 
@@ -1018,9 +1050,11 @@ def parse_openclaw_session_file(path: Path):
                 try:
                     obj = json.loads(line)
                 except Exception:
+                    add_message(start_ts_ms or end_ts_ms or 0, "other", "raw_json:malformed_line", f"```\n{line.rstrip()}\n```", count_for_stats=False)
                     continue
 
                 if not isinstance(obj, dict):
+                    add_raw_message(messages, start_ts_ms or end_ts_ms or 0, "other", obj, reason="openclaw_non_object")
                     continue
 
                 ts_ms = parse_ts(obj.get("timestamp"))
@@ -1038,10 +1072,12 @@ def parse_openclaw_session_file(path: Path):
                     continue
 
                 if obj_type != "message":
+                    add_raw_message(messages, ts_ms, "other", obj, reason=f"openclaw_type:{obj_type or 'unknown'}")
                     continue
 
                 message = obj.get("message")
                 if not isinstance(message, dict):
+                    add_raw_message(messages, ts_ms, "other", obj, reason="openclaw_missing_message")
                     continue
 
                 role = message.get("role") or "unknown"
@@ -1060,6 +1096,7 @@ def parse_openclaw_session_file(path: Path):
                                 continue
                             text = _claude_extract_text_item(item)
                             if not text:
+                                add_raw_message(messages, ts_ms, "other", item, reason=f"openclaw_user_item:{item.get('type') or 'unknown'}")
                                 continue
                             if text.startswith("A new session was started via /new or /reset."):
                                 add_message(ts_ms, "system", "context", text, count_for_stats=False)
@@ -1090,6 +1127,8 @@ def parse_openclaw_session_file(path: Path):
                             text = _claude_extract_text_item(item)
                             if text:
                                 add_message(ts_ms, "assistant", "message", text, count_for_stats=True)
+                            else:
+                                add_raw_message(messages, ts_ms, "other", item, reason=f"openclaw_assistant_item:{item_type or 'unknown'}")
                     continue
 
                 if role in ("toolResult", "tool_result", "tool"):
@@ -1102,6 +1141,10 @@ def parse_openclaw_session_file(path: Path):
                     text = extract_text(content)
                     if text:
                         add_message(ts_ms, role, "message", text, count_for_stats=False)
+                    else:
+                        add_raw_message(messages, ts_ms, role, message, reason=f"openclaw_role:{role or 'unknown'}")
+                else:
+                    add_raw_message(messages, ts_ms, role, message, reason=f"openclaw_role:{role or 'unknown'}")
     except FileNotFoundError:
         return None
 
@@ -1507,18 +1550,33 @@ class Indexer:
             "is_truncated": bool(is_truncated),
         }
 
-    def get_session(self, session_id):
+    def get_session_metadata(self, session_id):
         with self.lock:
-            cached = self._session_preview_cache.get(str(session_id))
-            if cached is not None:
-                self._session_preview_cache.move_to_end(str(session_id))
-                return cached
             session = self.conn.execute(
                 "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned FROM sessions WHERE id = ?",
                 (session_id,),
             ).fetchone()
             if not session:
                 return None
+            payload = dict(session)
+            total_row = self.conn.execute(
+                "SELECT COUNT(*) AS total FROM messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            payload["message_total"] = int(total_row["total"] or 0)
+            return payload
+
+    def get_session_messages_page(self, session_id, offset=0, limit=DEFAULT_LIMIT):
+        clean_limit, clean_offset = normalize_page_args(limit, offset, default_limit=DEFAULT_LIMIT, max_limit=DEFAULT_LIMIT)
+        with self.lock:
+            session = self.conn.execute("SELECT 1 FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if not session:
+                return None
+            total_row = self.conn.execute(
+                "SELECT COUNT(*) AS total FROM messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            total = int(total_row["total"] or 0)
             messages = self.conn.execute(
                 """
                 SELECT
@@ -1537,23 +1595,43 @@ class Indexer:
                 FROM messages
                 WHERE session_id = ?
                 ORDER BY ts_ms ASC, id ASC
+                LIMIT ? OFFSET ?
                 """,
                 (
                     MESSAGE_INLINE_FULL_THRESHOLD,
                     MESSAGE_PREVIEW_FETCH_CHARS,
                     MESSAGE_INLINE_FULL_THRESHOLD,
                     session_id,
+                    clean_limit,
+                    clean_offset,
                 ),
             ).fetchall()
-            payload = {
-                "session": dict(session),
-                "messages": [
-                    self._serialize_message_row(row, idx)
-                    for idx, row in enumerate(messages)
-                ],
-            }
+        return {
+            "messages": [
+                self._serialize_message_row(row, clean_offset + idx)
+                for idx, row in enumerate(messages)
+            ],
+            "offset": clean_offset,
+            "limit": clean_limit,
+            "total": total,
+        }
+
+    def get_session(self, session_id, include_messages=True):
+        session = self.get_session_metadata(session_id)
+        if not session:
+            return None
+        payload = {"session": session}
+        if include_messages:
+            cached = self._session_preview_cache.get(str(session_id))
+            if cached is not None:
+                self._session_preview_cache.move_to_end(str(session_id))
+                return cached
+            page = self.get_session_messages_page(session_id, offset=0, limit=DEFAULT_LIMIT)
+            if page is None:
+                return None
+            payload["messages"] = page["messages"]
             self._remember_session_preview_cache(session_id, payload)
-            return payload
+        return payload
 
     def get_session_message(self, session_id, message_index):
         try:
@@ -2048,15 +2126,30 @@ class HermesStateIndexer:
             "next_offset": next_offset,
         }
 
-    def get_session(self, session_id):
+    def get_session_metadata(self, session_id):
         with self.lock:
-            cached = self._session_preview_cache.get(str(session_id))
-            if cached is not None:
-                self._session_preview_cache.move_to_end(str(session_id))
-                return cached
             session = self._session_lookup(session_id)
             if not session:
                 return None
+            payload = self._serialize_session_row(session)
+            total_row = self.conn.execute(
+                "SELECT COUNT(*) AS total FROM messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            payload["message_total"] = int(total_row["total"] or 0)
+            return payload
+
+    def get_session_messages_page(self, session_id, offset=0, limit=DEFAULT_LIMIT):
+        clean_limit, clean_offset = normalize_page_args(limit, offset, default_limit=DEFAULT_LIMIT, max_limit=DEFAULT_LIMIT)
+        with self.lock:
+            session = self._session_lookup(session_id)
+            if not session:
+                return None
+            total_row = self.conn.execute(
+                "SELECT COUNT(*) AS total FROM messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            total = int(total_row["total"] or 0)
             messages = self.conn.execute(
                 """
                 SELECT
@@ -2086,6 +2179,7 @@ class HermesStateIndexer:
                 FROM messages
                 WHERE session_id = ?
                 ORDER BY timestamp ASC, id ASC
+                LIMIT ? OFFSET ?
                 """,
                 (
                     MESSAGE_INLINE_FULL_THRESHOLD,
@@ -2095,17 +2189,36 @@ class HermesStateIndexer:
                     MESSAGE_PREVIEW_FETCH_CHARS,
                     MESSAGE_INLINE_FULL_THRESHOLD,
                     session_id,
+                    clean_limit,
+                    clean_offset,
                 ),
             ).fetchall()
-            payload = {
-                "session": self._serialize_session_row(session),
-                "messages": [
-                    self._serialize_message_row(row, idx)
-                    for idx, row in enumerate(messages)
-                ],
-            }
+        return {
+            "messages": [
+                self._serialize_message_row(row, clean_offset + idx)
+                for idx, row in enumerate(messages)
+            ],
+            "offset": clean_offset,
+            "limit": clean_limit,
+            "total": total,
+        }
+
+    def get_session(self, session_id, include_messages=True):
+        session = self.get_session_metadata(session_id)
+        if not session:
+            return None
+        payload = {"session": session}
+        if include_messages:
+            cached = self._session_preview_cache.get(str(session_id))
+            if cached is not None:
+                self._session_preview_cache.move_to_end(str(session_id))
+                return cached
+            page = self.get_session_messages_page(session_id, offset=0, limit=DEFAULT_LIMIT)
+            if page is None:
+                return None
+            payload["messages"] = page["messages"]
             self._remember_session_preview_cache(session_id, payload)
-            return payload
+        return payload
 
     def get_session_message(self, session_id, message_index):
         try:
@@ -2380,6 +2493,15 @@ class Handler(SimpleHTTPRequestHandler):
             return None, None
         return unquote(match.group(1)), int(match.group(2))
 
+    def _extract_session_messages_request(self, source_path, suffix="/messages"):
+        if not source_path or not source_path.startswith("/session/"):
+            return None
+        if not source_path.endswith(suffix):
+            return None
+        start = len("/session/")
+        end = -len(suffix)
+        return unquote(source_path[start:end])
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -2395,6 +2517,12 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.handle_sessions(parsed, backend)
             if source_path == "/projects":
                 return self.handle_projects(parsed, backend)
+            if source_path and source_path.endswith("/messages/search"):
+                session_id = self._extract_session_messages_request(source_path, "/messages/search")
+                return self.handle_session_messages_search(session_id, parsed, backend)
+            if source_path and source_path.endswith("/messages"):
+                session_id = self._extract_session_messages_request(source_path, "/messages")
+                return self.handle_session_messages(session_id, parsed, backend)
             if source_path and "/message/" in source_path:
                 session_id, message_index = self._extract_session_message_request(source_path)
                 return self.handle_session_message(session_id, message_index, backend)
@@ -2403,7 +2531,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.handle_session_search(session_id, parsed, backend)
             if source_path and source_path.startswith("/session/"):
                 session_id = self._extract_session_id(source_path)
-                return self.handle_session(session_id, backend)
+                return self.handle_session(session_id, backend, parsed)
             if source_path == "/reindex":
                 backend.indexer.scan_sessions()
                 return self.send_json({"ok": True})
@@ -2560,9 +2688,24 @@ class Handler(SimpleHTTPRequestHandler):
             "next_offset": page["next_offset"],
         })
 
-    def handle_session(self, session_id, backend):
-        data = backend.indexer.get_session(session_id)
+    def handle_session(self, session_id, backend, parsed=None):
+        include_messages = False
+        if parsed is not None:
+            params = parse_qs(parsed.query)
+            include_messages = params.get("include_messages", ["0"])[0] in ("1", "true", "yes")
+        data = backend.indexer.get_session(session_id, include_messages=include_messages)
         if not data:
+            return self.send_json({"error": "not_found"}, status=404)
+        return self.send_json(data)
+
+    def handle_session_messages(self, session_id, parsed, backend):
+        if session_id is None:
+            return self.send_json({"error": "not_found"}, status=404)
+        params = parse_qs(parsed.query)
+        offset = params.get("offset", [0])[0]
+        limit = params.get("limit", [DEFAULT_LIMIT])[0]
+        data = backend.indexer.get_session_messages_page(session_id, offset=offset, limit=limit)
+        if data is None:
             return self.send_json({"error": "not_found"}, status=404)
         return self.send_json(data)
 
@@ -2584,6 +2727,9 @@ class Handler(SimpleHTTPRequestHandler):
         if data is None:
             return self.send_json({"error": "not_found"}, status=404)
         return self.send_json(data)
+
+    def handle_session_messages_search(self, session_id, parsed, backend):
+        return self.handle_session_search(session_id, parsed, backend)
 
     def send_json(self, obj, status=200):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
