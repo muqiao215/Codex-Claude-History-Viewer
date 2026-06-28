@@ -46,6 +46,9 @@ const sidebarResizerEl = document.getElementById("sidebarResizer");
 const headerResizerEl = document.getElementById("headerResizer");
 const mainEl = document.getElementById("main");
 const scrollBottomBtn = document.getElementById("scrollBottomBtn");
+const auditPanelEl = document.getElementById("auditPanel");
+const auditActionsEl = document.getElementById("auditActions");
+const auditToggleEl = document.getElementById("auditToggle");
 const codeThemeButtons = document.querySelectorAll("[data-code-theme]");
 
 let currentSession = null;
@@ -107,6 +110,10 @@ let currentMessageTotal = 0;
 let currentMessagesLoadingEarlier = false;
 let currentSearchRenderLimit = MESSAGE_RENDER_PAGE_SIZE;
 let pinSessionInFlight = false;
+let currentAudit = null;
+let auditFetchSeq = 0;
+let auditCollapsed = false;
+let currentFilePathFilter = "";
 
 if (scrollBottomBtn) {
   const updateScrollBottomBtn = () => {
@@ -2049,6 +2056,13 @@ function resetSessionPane() {
   resumeCmdWslEl.textContent = "-";
   messagesEl.innerHTML = "";
   if (sessionActionsEl) sessionActionsEl.style.display = "none";
+  if (auditActionsEl) auditActionsEl.style.display = "none";
+  if (auditPanelEl) {
+    auditPanelEl.hidden = true;
+    auditPanelEl.innerHTML = "";
+  }
+  currentAudit = null;
+  auditFetchSeq += 1;
   updateMatchNavState("");
 }
 
@@ -2087,6 +2101,268 @@ function renderSessionHeader(session) {
     pinSessionBtn.textContent = session.pinned ? "📌 Unpin" : "📌 Pin";
     pinSessionBtn.disabled = pinSessionInFlight || sourceIsReadOnly();
   }
+}
+
+// BDD cross-ref (002 §M4): the panel renders sections in this fixed order so a
+// reviewer can answer the six audit questions without scrolling the transcript.
+const AUDIT_INTENT_PREVIEW_CHARS = 280;
+const AUDIT_OUTCOME_SUMMARY_CHARS = 280;
+const AUDIT_ERROR_SAMPLE_LIMIT = 3;
+const AUDIT_FILE_ROW_LIMIT = 12;
+
+const COMMAND_INTENT_META = {
+  TEST: { icon: "\u{1F9EA}", label: "Test", cls: "badge-test" },
+  BUILD: { icon: "\u{1F528}", label: "Build", cls: "badge-deploy" },
+  DEPLOY: { icon: "\u{1F680}", label: "Deploy", cls: "badge-deploy" },
+  REMOTE: { icon: "\u{1F310}", label: "Remote", cls: "badge-remote" },
+  DEBUG: { icon: "\u{1F41E}", label: "Debug", cls: "badge-debug" },
+  NETWORK: { icon: "\u{1F310}", label: "Network", cls: "badge-remote" },
+  SEARCH: { icon: "\u{1F50D}", label: "Search", cls: "badge-tools" },
+  READ: { icon: "\u{1F4D6}", label: "Read", cls: "badge-tools" },
+  UNKNOWN: { icon: "?", label: "Other", cls: "badge-tools" },
+};
+
+function renderAuditPanel(audit) {
+  if (!auditPanelEl) return;
+  if (!audit) {
+    auditPanelEl.innerHTML = `<div class="audit-empty muted">Audit unavailable for this source.</div>`;
+    return;
+  }
+  const html = [
+    _auditSectionIntent(audit),
+    _auditSectionOutcome(audit),
+    _auditSectionDeliverables(audit),
+    _auditSectionCommandIntents(audit),
+    _auditSectionFriction(audit),
+    _auditSectionValue(audit),
+  ].filter(Boolean).join("");
+  auditPanelEl.innerHTML = html ? `<div class="audit-sections">${html}</div>` : `<div class="audit-empty muted">No audit signals.</div>`;
+  auditPanelEl.scrollTop = 0;
+}
+
+function _auditSection(title, icon, bodyHtml) {
+  return `<section class="audit-section"><div class="audit-section-head"><span class="audit-section-icon" aria-hidden="true">${icon}</span><span class="audit-section-title">${title}</span></div><div class="audit-section-body">${bodyHtml}</div></section>`;
+}
+
+function _auditExpandable(text, previewChars, kind) {
+  const safe = String(text || "");
+  if (!safe) return `<span class="audit-muted muted">—</span>`;
+  if (safe.length <= previewChars) return `<span class="audit-text">${escapeHtml(safe)}</span>`;
+  const preview = safe.slice(0, previewChars);
+  return `<span class="audit-text audit-truncated" data-audit-kind="${escapeHtml(kind)}"><span class="audit-text-preview">${escapeHtml(preview)}<button type="button" class="audit-expand" data-audit-expand="${escapeHtml(kind)}" aria-expanded="false">…</button></span><span class="audit-text-full" hidden>${escapeHtml(safe)}</span></span>`;
+}
+
+function _auditSectionIntent(audit) {
+  const prompt = audit.first_user_prompt || audit.last_user_prompt || "";
+  if (!prompt) return "";
+  return _auditSection("Intent", "\u{1F4AC}", _auditExpandable(prompt, AUDIT_INTENT_PREVIEW_CHARS, "intent"));
+}
+
+function _auditSectionOutcome(audit) {
+  const outcome = audit.outcome_signal || "unknown";
+  const reply = audit.last_assistant_reply || "";
+  const meta = COMMAND_INTENT_META[outcome.toUpperCase()] || { icon: "?", label: outcome };
+  const replyHtml = reply
+    ? _auditExpandable(reply, AUDIT_OUTCOME_SUMMARY_CHARS, "outcome")
+    : `<span class="audit-muted muted">No assistant reply recorded.</span>`;
+  return _auditSection("Outcome", meta.icon, `<div class="audit-outcome"><span class="audit-badge badge-outcome outcome-${escapeHtml(outcome)}">${escapeHtml(outcome)}</span></div>${replyHtml}`);
+}
+
+function _auditFileRow(footprint, bucket) {
+  const path = footprint.path || "";
+  if (!path) return "";
+  const edits = Number(footprint.edit_count) || 0;
+  const writes = Number(footprint.write_count) || 0;
+  const conf = footprint.confidence || "medium";
+  const counts = [];
+  if (writes > 0) counts.push(`<span class="audit-file-count">w:${writes}</span>`);
+  if (edits > 0) counts.push(`<span class="audit-file-count">e:${edits}</span>`);
+  const countsHtml = counts.length ? `<span class="audit-file-counts">${counts.join("")}</span>` : "";
+  return `<div class="audit-row audit-file-row" data-file-path="${escapeHtml(path)}" data-file-bucket="${escapeHtml(bucket)}" data-confidence="${escapeHtml(conf)}"><span class="audit-file-path" title="${escapeHtml(path)}">${escapeHtml(path)}</span>${countsHtml}<span class="audit-file-confidence audit-confidence-${escapeHtml(conf)}">${escapeHtml(conf)}</span></div>`;
+}
+
+function _auditSectionDeliverables(audit) {
+  const ft = audit.files_touched || {};
+  const local = Array.isArray(ft.local) ? ft.local.slice(0, AUDIT_FILE_ROW_LIMIT) : [];
+  const remote = Array.isArray(ft.remote) ? ft.remote.slice(0, AUDIT_FILE_ROW_LIMIT) : [];
+  const inferred = Array.isArray(ft.inferred) ? ft.inferred.slice(0, AUDIT_FILE_ROW_LIMIT) : [];
+  if (!local.length && !remote.length && !inferred.length) {
+    return _auditSection("Deliverables", "\u{1F4C2}", `<span class="audit-muted muted">No files touched in this session.</span>`);
+  }
+  const groups = [];
+  if (local.length) {
+    groups.push(`<div class="audit-group"><div class="audit-group-label">Local <span class="audit-muted">(${local.length})</span></div>${local.map(f => _auditFileRow(f, "local")).join("")}</div>`);
+  }
+  if (remote.length) {
+    groups.push(`<div class="audit-group"><div class="audit-group-label">Remote <span class="audit-muted">(${remote.length})</span></div>${remote.map(f => _auditFileRow(f, "remote")).join("")}</div>`);
+  }
+  if (inferred.length) {
+    groups.push(`<div class="audit-group"><div class="audit-group-label">Inferred <span class="audit-muted">(${inferred.length})</span></div>${inferred.map(f => _auditFileRow(f, "inferred")).join("")}</div>`);
+  }
+  return _auditSection("Deliverables", "\u{1F4C2}", groups.join(""));
+}
+
+function _auditSectionCommandIntents(audit) {
+  const intents = audit.command_intents || {};
+  const entries = Object.entries(intents).filter(([, n]) => Number(n) > 0);
+  if (!entries.length) return _auditSection("Command intents", "\u{1F6E0}", `<span class="audit-muted muted">No shell commands classified.</span>`);
+  const total = entries.reduce((sum, [, n]) => sum + (Number(n) || 0), 0) || 1;
+  const sorted = entries.sort((a, b) => (Number(b[1]) || 0) - (Number(a[1]) || 0));
+  const rows = sorted.map(([key, count]) => {
+    const upper = String(key || "UNKNOWN").toUpperCase();
+    const meta = COMMAND_INTENT_META[upper] || COMMAND_INTENT_META.UNKNOWN;
+    const pct = Math.round((Number(count) || 0) / total * 100);
+    return `<div class="audit-row audit-intent-row" title="${escapeHtml(meta.label)}: ${Number(count) || 0} command(s)">
+      <span class="audit-badge ${escapeHtml(meta.cls)}">${meta.icon} ${escapeHtml(meta.label)}</span>
+      <span class="audit-bar"><span class="audit-bar-fill" style="width:${pct}%"></span></span>
+      <span class="audit-intent-count">${Number(count) || 0}</span>
+    </div>`;
+  }).join("");
+  return _auditSection("Command intents", "\u{1F6E0}", `<div class="audit-intents">${rows}</div>`);
+}
+
+function _auditSectionFriction(audit) {
+  const score = Number(audit.friction_score) || 0;
+  const errs = audit.errors || {};
+  const samples = Array.isArray(errs.samples) ? errs.samples.slice(0, AUDIT_ERROR_SAMPLE_LIMIT) : [];
+  const errCount = Number(errs.count) || samples.length;
+  const errorEvidence = (audit.evidence || []).filter(ev => ev?.type === "error").slice(0, AUDIT_ERROR_SAMPLE_LIMIT);
+  const head = `<div class="audit-friction-head"><span class="audit-badge ${score > 0 ? "badge-friction" : "badge-outcome"}">\u26A0\uFE0F Friction ${score}</span>${errCount > 0 ? `<span class="audit-muted">${errCount} error(s)</span>` : ""}</div>`;
+  if (!samples.length) {
+    return _auditSection("Friction", "\u26A0\uFE0F", `${head}<span class="audit-muted muted">No errors recorded.</span>`);
+  }
+  const rows = samples.map((sample, idx) => {
+    const ev = errorEvidence[idx];
+    const evAttr = ev?.id ? ` data-evidence-id="${escapeHtml(ev.id)}"` : "";
+    const preview = String(sample || "").slice(0, 200);
+    return `<div class="audit-row audit-error-row"${evAttr}><span class="audit-error-text">${escapeHtml(preview)}</span></div>`;
+  }).join("");
+  return _auditSection("Friction", "\u26A0\uFE0F", `${head}${rows}`);
+}
+
+function _auditSectionValue(audit) {
+  const score = Number(audit.value_score) || 0;
+  const tier = score >= 70 ? "high" : score >= 30 ? "medium" : "low";
+  const interpretation = score >= 70 ? "Strong signal: meaningful work shipped."
+    : score >= 30 ? "Mixed signal: some progress, but limited payoff."
+    : "Low signal: little demonstrable value captured.";
+  return _auditSection("Value", "\u{1F48E}", `<div class="audit-value"><span class="audit-badge badge-value">\u25C6 ${score}</span><span class="audit-value-tier audit-value-${tier}">${escapeHtml(tier)}</span></div><div class="audit-value-note muted">${escapeHtml(interpretation)}</div>`);
+}
+
+async function fetchAuditPanel(sessionId) {
+  if (!auditPanelEl) return;
+  const seq = (auditFetchSeq += 1);
+  auditCollapsed = false;
+  auditPanelEl.hidden = false;
+  if (auditToggleEl) {
+    auditToggleEl.textContent = "📊 Hide audit";
+    auditToggleEl.setAttribute("aria-expanded", "true");
+  }
+  auditPanelEl.innerHTML = `<div class="audit-loading muted">Loading audit…</div>`;
+  try {
+    const res = await fetch(`${apiBase()}/session/${encodeURIComponent(sessionId)}/audit`);
+    if (seq !== auditFetchSeq) return;
+    if (res.status === 404) {
+      currentAudit = null;
+      renderAuditPanel(null);
+      if (auditActionsEl) auditActionsEl.style.display = "none";
+      return;
+    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (seq !== auditFetchSeq) return;
+    currentAudit = data.audit || null;
+    renderAuditPanel(currentAudit);
+    if (auditActionsEl) auditActionsEl.style.display = currentAudit ? "flex" : "none";
+  } catch (err) {
+    if (seq !== auditFetchSeq) return;
+    currentAudit = null;
+    auditPanelEl.innerHTML = `<div class="audit-error">Audit load failed: ${escapeHtml(err?.message || String(err))}</div>`;
+    if (auditActionsEl) auditActionsEl.style.display = "none";
+  }
+}
+
+function toggleAuditPanel() {
+  if (!auditPanelEl) return;
+  auditCollapsed = !auditCollapsed;
+  auditPanelEl.hidden = auditCollapsed;
+  if (auditToggleEl) {
+    auditToggleEl.textContent = auditCollapsed ? "📊 Show audit" : "📊 Hide audit";
+    auditToggleEl.setAttribute("aria-expanded", auditCollapsed ? "false" : "true");
+  }
+}
+
+function findEvidenceById(evidenceId) {
+  if (!evidenceId || !currentAudit?.evidence) return null;
+  return currentAudit.evidence.find(ev => ev?.id === evidenceId) || null;
+}
+
+function findMessageElByIndex(messageIndex) {
+  if (!Number.isInteger(messageIndex)) return null;
+  return messagesEl.querySelector(`.msg[data-message-index="${messageIndex}"]`) || null;
+}
+
+async function ensureMessageLoaded(messageIndex) {
+  if (findMessageElByIndex(messageIndex)) return true;
+  if (!currentSession || !Number.isInteger(messageIndex)) return false;
+  const offset = Math.max(0, messageIndex - 1);
+  const limit = Math.max(MESSAGE_RENDER_PAGE_SIZE, messageIndex - offset + 40);
+  try {
+    await loadMessageWindow({ offset, limit, replace: true, scrollToBottom: false });
+    return !!findMessageElByIndex(messageIndex);
+  } catch (err) {
+    return false;
+  }
+}
+
+async function scrollToMessage(messageIndex) {
+  if (!Number.isInteger(messageIndex)) return false;
+  if (!(await ensureMessageLoaded(messageIndex))) return false;
+  const el = findMessageElByIndex(messageIndex);
+  if (!el) return false;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.add("audit-flash");
+  setTimeout(() => el.classList.remove("audit-flash"), 1600);
+  return true;
+}
+
+function filterSessionsByFilePath(filePath) {
+  const path = String(filePath || "").trim();
+  const params = new URLSearchParams(window.location.search);
+  if (path) {
+    params.set("file", path);
+  } else {
+    params.delete("file");
+  }
+  const newSearch = params.toString();
+  const newUrl = newSearch ? `${window.location.pathname}?${newSearch}` : window.location.pathname;
+  window.history.replaceState({}, "", newUrl);
+  currentFilePathFilter = path;
+  updateFilePathFilterBanner();
+  reloadList();
+}
+
+function updateFilePathFilterBanner() {
+  const banner = document.getElementById("fileFilterBanner");
+  if (!banner) return;
+  if (currentFilePathFilter) {
+    banner.hidden = false;
+    const label = banner.querySelector("[data-file-filter-label]");
+    if (label) label.textContent = currentFilePathFilter;
+  } else {
+    banner.hidden = true;
+  }
+}
+
+function clearFilePathFilter() {
+  if (!currentFilePathFilter) return;
+  filterSessionsByFilePath("");
+}
+
+function loadFilePathFilterFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  currentFilePathFilter = (params.get("file") || "").trim();
+  updateFilePathFilterBanner();
 }
 
 function setResultsHeader() {
@@ -2265,6 +2541,7 @@ function buildListParams(limit, offset) {
   if (end) params.set("end", end);
   if (currentProject) params.set("project", currentProject);
   if (currentSessionSort) params.set("sort", currentSessionSort);
+  if (currentFilePathFilter) params.set("file", currentFilePathFilter);
   params.set("limit", String(limit));
   params.set("offset", String(offset));
   return params;
@@ -2343,6 +2620,7 @@ async function fetchSession(sessionId) {
     currentMessageOffset = Math.max(0, currentMessageTotal - MESSAGE_RENDER_PAGE_SIZE);
     expandedMessageIndexes = new Set();
     renderSessionHeader(currentSession);
+    fetchAuditPanel(currentSession.id);
     await loadMessageWindow({
       offset: currentMessageOffset,
       limit: MESSAGE_RENDER_PAGE_SIZE,
@@ -2640,6 +2918,53 @@ if (deleteProjectSessionsBtn) {
 if (cleanupWeakSessionsBtn) {
   cleanupWeakSessionsBtn.addEventListener("click", async () => {
     await cleanupWeakSessions();
+  });
+}
+
+if (auditToggleEl) {
+  auditToggleEl.addEventListener("click", () => {
+    toggleAuditPanel();
+  });
+}
+
+const clearFileFilterBtn = document.getElementById("clearFileFilter");
+if (clearFileFilterBtn) {
+  clearFileFilterBtn.addEventListener("click", () => {
+    clearFilePathFilter();
+  });
+}
+
+if (auditPanelEl) {
+  auditPanelEl.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const expandBtn = target.closest("[data-audit-expand]");
+    if (expandBtn) {
+      const wrap = expandBtn.closest(".audit-truncated");
+      if (!wrap) return;
+      const preview = wrap.querySelector(".audit-text-preview");
+      const full = wrap.querySelector(".audit-text-full");
+      const expanded = full && !full.hidden;
+      if (preview && full) {
+        preview.hidden = expanded;
+        full.hidden = !expanded;
+        expandBtn.textContent = expanded ? "…" : "⤬";
+        expandBtn.setAttribute("aria-expanded", expanded ? "false" : "true");
+      }
+      return;
+    }
+    const fileRow = target.closest("[data-file-path]");
+    if (fileRow) {
+      filterSessionsByFilePath(fileRow.dataset.filePath || "");
+      return;
+    }
+    const evidenceRow = target.closest("[data-evidence-id]");
+    if (evidenceRow) {
+      const ev = findEvidenceById(evidenceRow.dataset.evidenceId || "");
+      if (ev && Number.isInteger(ev.message_index)) {
+        await scrollToMessage(ev.message_index);
+      }
+    }
   });
 }
 
@@ -2963,6 +3288,7 @@ async function bootstrapApp() {
   await loadSourceCatalog();
   applyStoredSourceContext();
   updateResumeCommandLabels();
+  loadFilePathFilterFromUrl();
   reloadList();
 }
 
@@ -3018,5 +3344,20 @@ if (globalThis.__CCHV_TEST__) {
     renderMessages,
     getMessagesElement() { return messagesEl; },
     handlePinSessionClick,
+    renderAuditPanel,
+    auditSectionIntent: _auditSectionIntent,
+    auditSectionOutcome: _auditSectionOutcome,
+    auditSectionDeliverables: _auditSectionDeliverables,
+    auditSectionCommandIntents: _auditSectionCommandIntents,
+    auditSectionFriction: _auditSectionFriction,
+    auditSectionValue: _auditSectionValue,
+    auditExpandable: _auditExpandable,
+    auditFileRow: _auditFileRow,
+    findEvidenceById,
+    setCurrentAudit(value) { currentAudit = value; },
+    getCurrentAudit() { return currentAudit; },
+    setCurrentFilePathFilter(value) { currentFilePathFilter = String(value || ""); },
+    getCurrentFilePathFilter() { return currentFilePathFilter; },
+    getAuditPanelElement() { return auditPanelEl; },
   };
 }

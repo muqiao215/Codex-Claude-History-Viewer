@@ -60,6 +60,36 @@ def _strip_audit_raw_json(item):
     return item
 
 
+def _match_files_touched(files_touched_json, target_path):
+    # ALGO: two-stage filter for ?file= cross-session drill-down (002 §M4).
+    # Stage 1 (SQL LIKE) narrows candidate rows; stage 2 (this) parses the JSON
+    # and matches the exact path field, eliminating prefix-collisions that
+    # coarse LIKE would admit (e.g. /a/b.py vs /a/b_backup.py).
+    if not files_touched_json or not target_path:
+        return False
+    try:
+        data = json.loads(files_touched_json) if isinstance(files_touched_json, str) else files_touched_json
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    needle = str(target_path)
+    for bucket in ("local", "remote", "inferred"):
+        entries = data.get(bucket) or []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("path") or "") == needle:
+                return True
+    return False
+
+
+def _escape_sql_like(value):
+    # SECURITY: user-supplied ?file= paths flow into a LIKE clause; escape the
+    # pattern metacharacters so %/_ in a path can't broaden the match.
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def detect_runtime_system(os_name=None):
     return "windows" if str(os_name or os.name).lower() == "nt" else "linux"
 
@@ -1477,7 +1507,7 @@ class Indexer:
 
         self._local_title_backfill_done = True
 
-    def query_sessions(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_LIMIT, cwd=None, sort=None):
+    def query_sessions(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_LIMIT, cwd=None, sort=None, file_path=None):
         terms = []
         if q:
             terms = [t for t in q.split() if t]
@@ -1508,6 +1538,9 @@ class Indexer:
         if cwd:
             sql += " AND cwd = ?"
             args.append(cwd)
+        if file_path:
+            sql += " AND files_touched_json LIKE ? ESCAPE '\\'"
+            args.append("%" + _escape_sql_like(file_path) + "%")
         for term in terms:
             sql += " AND (search_blob LIKE ? OR title LIKE ? OR cwd LIKE ?)"
             like = f"%{term}%"
@@ -1518,12 +1551,14 @@ class Indexer:
         with self.lock:
             rows = self.conn.execute(sql, args).fetchall()
         items = [dict(row) for row in rows]
+        if file_path:
+            items = [it for it in items if _match_files_touched(it.get("files_touched_json"), file_path)]
         for item in items:
             item.update(deserialize_audit_summary(item))
             _strip_audit_raw_json(item)
         return items
 
-    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None):
+    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None, file_path=None):
         clean_limit, clean_offset = normalize_page_args(limit, offset)
         terms = [t for t in str(q or "").split() if t]
 
@@ -1548,6 +1583,9 @@ class Indexer:
         if cwd:
             where_sql += " AND cwd = ?"
             args.append(cwd)
+        if file_path:
+            where_sql += " AND files_touched_json LIKE ? ESCAPE '\\'"
+            args.append("%" + _escape_sql_like(file_path) + "%")
         for term in terms:
             where_sql += " AND (search_blob LIKE ? OR title LIKE ? OR cwd LIKE ?)"
             like = f"%{term}%"
@@ -1576,9 +1614,16 @@ class Indexer:
             item.update(deserialize_audit_summary(item))
             return _strip_audit_raw_json(item)
 
-        unpinned_items = [_with_audit(row) for row in rows[:clean_limit]]
-        items = [_with_audit(row) for row in pinned_rows] + unpinned_items
-        has_more = len(rows) > clean_limit
+        if file_path:
+            matched_pinned = [r for r in pinned_rows if _match_files_touched(r["files_touched_json"], file_path)]
+            matched_unpinned = [r for r in rows if _match_files_touched(r["files_touched_json"], file_path)]
+            unpinned_items = [_with_audit(r) for r in matched_unpinned[:clean_limit]]
+            items = [_with_audit(r) for r in matched_pinned] + unpinned_items
+            has_more = len(matched_unpinned) > clean_limit
+        else:
+            unpinned_items = [_with_audit(row) for row in rows[:clean_limit]]
+            items = [_with_audit(row) for row in pinned_rows] + unpinned_items
+            has_more = len(rows) > clean_limit
         next_offset = clean_offset + len(unpinned_items) if has_more else None
         return {
             "items": items,
@@ -1728,6 +1773,23 @@ class Indexer:
             payload["messages"] = page["messages"]
             self._remember_session_preview_cache(session_id, payload)
         return payload
+
+    def build_session_audit(self, session_id):
+        # BDD: 002 §M4 — `GET /api/sessions/{id}/audit` returns full payload.
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT file_path FROM sessions WHERE id = ?",
+                (str(session_id),),
+            ).fetchone()
+        if not row or not row["file_path"]:
+            return None
+        file_path = Path(row["file_path"])
+        if not file_path.is_file():
+            return None
+        payload = build_audit_for_file(file_path, self.source, session_id_hint=str(session_id))
+        if payload is None:
+            return None
+        return payload.to_dict()
 
     def get_session_message(self, session_id, message_index):
         try:
@@ -2776,8 +2838,8 @@ class OpenCodeIndexer:
         window = flat[clean_offset:clean_offset + clean_limit]
         return {
             "messages": [
-                self._serialize_flat_message(msg, clean_offset + idx)
-                for idx, msg in enumerate(window)
+                self._serialize_message_row(row, clean_offset + idx)
+                for idx, row in enumerate(messages)
             ],
             "offset": clean_offset,
             "limit": clean_limit,
@@ -3063,6 +3125,16 @@ class Handler(SimpleHTTPRequestHandler):
         end = -len(suffix)
         return unquote(source_path[start:end])
 
+    def _extract_session_audit_request(self, source_path):
+        suffix = "/audit"
+        if not source_path or not source_path.startswith("/session/"):
+            return None
+        if not source_path.endswith(suffix):
+            return None
+        start = len("/session/")
+        end = -len(suffix)
+        return unquote(source_path[start:end])
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -3090,6 +3162,9 @@ class Handler(SimpleHTTPRequestHandler):
             if source_path and source_path.endswith("/search"):
                 session_id = self._extract_session_id(source_path, "/search")
                 return self.handle_session_search(session_id, parsed, backend)
+            if source_path and source_path.endswith("/audit"):
+                session_id = self._extract_session_audit_request(source_path)
+                return self.handle_session_audit(session_id, parsed, backend)
             if source_path and source_path.startswith("/session/"):
                 session_id = self._extract_session_id(source_path)
                 return self.handle_session(session_id, backend, parsed)
@@ -3214,6 +3289,7 @@ class Handler(SimpleHTTPRequestHandler):
         sort = params.get("sort", [""])[0].strip() or None
         limit = params.get("limit", [DEFAULT_PAGE_LIMIT])[0]
         offset = params.get("offset", [0])[0]
+        file_path = (params.get("file", [""])[0].strip() or None)
 
         start_ms = parse_date_param(start, end=False)
         end_ms = parse_date_param(end, end=True)
@@ -3226,6 +3302,7 @@ class Handler(SimpleHTTPRequestHandler):
             offset=offset,
             cwd=project,
             sort=sort,
+            file_path=file_path,
         )
         return self.send_json({
             "sessions": page["items"],
@@ -3258,6 +3335,15 @@ class Handler(SimpleHTTPRequestHandler):
         if not data:
             return self.send_json({"error": "not_found"}, status=404)
         return self.send_json(data)
+
+    def handle_session_audit(self, session_id, parsed, backend):
+        if session_id is None:
+            return self.send_json({"error": "not_found"}, status=404)
+        builder = getattr(backend.indexer, "build_session_audit", None)
+        audit = builder(session_id) if builder else None
+        if audit is None:
+            return self.send_json({"error": "audit_unavailable"}, status=404)
+        return self.send_json({"audit": audit})
 
     def handle_session_messages(self, session_id, parsed, backend):
         if session_id is None:

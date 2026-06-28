@@ -89,6 +89,11 @@
             </select>
           </div>
         </div>
+        <div id="fileFilterBanner" class="file-filter-banner" hidden>
+          <span class="file-filter-label">Filter:</span>
+          <span class="file-filter-path" data-file-filter-label title="Sessions touching this path"></span>
+          <button type="button" id="clearFileFilter" class="btn small" aria-label="Clear file filter">✕</button>
+        </div>
         <div id="sessionList" class="session-list"></div>
         <div id="listFooter" class="list-footer">
           <button type="button" id="listLoadMore" class="btn small" style="display:none">Load more</button>
@@ -137,6 +142,10 @@
           <button id="renameSession" type="button" class="btn small">✏️ Rename</button>
           <button id="archiveSession" type="button" class="btn small danger">🗑️ Archive</button>
         </div>
+        <div id="auditActions" class="session-actions audit-actions" style="display:none">
+          <button id="auditToggle" type="button" class="btn small" aria-expanded="true" aria-controls="auditPanel">📊 Hide audit</button>
+        </div>
+        <section id="auditPanel" class="audit-panel" hidden aria-live="polite"></section>
       </div>
       <div id="headerResizer" class="resizer horizontal" title="Resize header" aria-label="Resize header"></div>
       <div id="messages" class="messages"></div>

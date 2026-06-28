@@ -202,6 +202,8 @@ function createDocument() {
     clearTimeout() {},
     ResizeObserver: null,
     performance: { now: () => Date.now() },
+    location: { search: "", pathname: "/", origin: "http://localhost" },
+    history: { replaceState() {} },
   };
   documentElement.ownerDocument = { defaultView: fakeWindow };
   body.ownerDocument = { defaultView: fakeWindow };
