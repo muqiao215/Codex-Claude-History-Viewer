@@ -8,7 +8,7 @@ Each plan is a self-contained spec: goal, scope, milestones, acceptance criteria
 | # | Plan | Status | Updated | Commit |
 |---|---|---|---|---|
 | 001 | [Agent Value Audit](./001-agent-value-audit.md) | **M1–M3 DONE** · M4–M6 pending | 2026-06-27 | `4462cfb` |
-| 002 | [Detail Panel, Tool Collapse, AI Audit](./002-detail-panel-and-ai-audit.md) | **M4 DONE** · M5, M6 pending | 2026-06-28 | `4db9d2b` |
+| 002 | [Detail Panel, Tool Collapse, AI Audit](./002-detail-panel-and-ai-audit.md) | **M4 DONE** · M5, M6 pending | 2026-06-28 | `90e5f09` |
 
 ## Status Legend
 

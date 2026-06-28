@@ -3,7 +3,7 @@
 > **Status**: M4 DONE · M5, M6 pending.
 > **Prereqs**: [001 M1–M3](./001-agent-value-audit.md) (delivered in `4462cfb`).
 > **Last Updated**: 2026-06-28.
-> **M4 Delivering Commit**: `4db9d2b` (2026-06-28).
+> **M4 Delivering Commit**: `90e5f09` (2026-06-28).
 
 ## Goal
 
