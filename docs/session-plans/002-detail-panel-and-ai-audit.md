@@ -1,10 +1,11 @@
 # 002 — Detail Audit Panel, Tool Collapse, AI Audit
 
-> **Status**: M4, M5 DONE · M6 pending.
+> **Status**: M4, M5, M6 DONE · All milestones complete.
 > **Prereqs**: [001 M1–M3](./001-agent-value-audit.md) (delivered in `4462cfb`).
 > **Last Updated**: 2026-06-30.
 > **M4 Delivering Commit**: `90e5f09` (2026-06-28).
 > **M5 Delivering Commit**: `03e6ba0` (2026-06-30).
+> **M6 Delivering Commit**: _pending hash after push_.
 
 ## Goal
 

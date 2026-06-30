@@ -21,6 +21,15 @@ from audit import (
     patch_db_for_audit,
     serialize_audit_fields,
 )
+from audit.ai_audit import (
+    VALUE_SCORE_THRESHOLD,
+    build_llm_messages,
+    generate_heuristic_audit,
+    meets_cost_guard,
+    parse_llm_json_response,
+)
+from audit.llm_client import LLMError, call_chat_completions, detect_provider
+from audit.schema import LLM_AUDIT_INPUT_FIELDS
 
 MAX_SEARCH_CHARS = 2_000_000
 DEFAULT_LIMIT = 200
@@ -2161,6 +2170,36 @@ class Indexer:
             return None
         return payload.to_dict()
 
+    def get_stored_ai_audit(self, session_id):
+        # BDD: 002 §M6 — stored AI/heuristic audit persisted in audit_json column.
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT audit_json FROM sessions WHERE id = ?",
+                (str(session_id),),
+            ).fetchone()
+        if not row or not row["audit_json"]:
+            return None
+        try:
+            return json.loads(row["audit_json"])
+        except (ValueError, TypeError):
+            return None
+
+    def store_ai_audit(self, session_id, audit_json):
+        with self.lock:
+            self.conn.execute(
+                "UPDATE sessions SET audit_json = ?, audit_updated_at = ? WHERE id = ?",
+                (json.dumps(audit_json, ensure_ascii=False), int(time.time() * 1000), str(session_id)),
+            )
+            self.conn.commit()
+
+    def clear_ai_audit(self, session_id):
+        with self.lock:
+            self.conn.execute(
+                "UPDATE sessions SET audit_json = NULL, audit_updated_at = NULL WHERE id = ?",
+                (str(session_id),),
+            )
+            self.conn.commit()
+
     def get_session_message(self, session_id, message_index):
         try:
             offset = int(message_index)
@@ -3429,10 +3468,11 @@ class SourceBackend:
 
 
 class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, directory=None, source_backends=None, wsl_distro=None, runtime_system="windows", **kwargs):
+    def __init__(self, *args, directory=None, source_backends=None, wsl_distro=None, runtime_system="windows", audit_config=None, **kwargs):
         self._source_backends = source_backends or {}
         self._wsl_distro = wsl_distro
         self._runtime_system = str(runtime_system or "windows").strip() or "windows"
+        self._audit_config = audit_config or {}
         super().__init__(*args, directory=directory, **kwargs)
 
     def _resolve_source_request(self, path):
@@ -3623,6 +3663,12 @@ class Handler(SimpleHTTPRequestHandler):
         if source_path == "/cleanup/weak-sessions":
             return _cleanup_weak()
         if source_path.startswith("/session/"):
+            if source_path.endswith("/audit/delete"):
+                session_id = self._extract_session_id(source_path, "/audit/delete")
+                return self.handle_audit_delete(session_id, backend)
+            if source_path.endswith("/audit"):
+                session_id = self._extract_session_id(source_path, "/audit")
+                return self.handle_audit_generate(session_id, data, backend)
             if source_path.endswith("/rename"):
                 return _rename()
             if source_path.endswith("/archive"):
@@ -3713,7 +3759,74 @@ class Handler(SimpleHTTPRequestHandler):
         audit = builder(session_id) if builder else None
         if audit is None:
             return self.send_json({"error": "audit_unavailable"}, status=404)
-        return self.send_json({"audit": audit})
+        ai_audit = None
+        getter = getattr(backend.indexer, "get_stored_ai_audit", None)
+        if getter:
+            ai_audit = getter(session_id)
+        return self.send_json({
+            "audit": audit,
+            "ai_audit": ai_audit,
+            "ai_configured": self._audit_llm_configured(),
+        })
+
+    def handle_audit_generate(self, session_id, data, backend):
+        if session_id is None:
+            return self.send_json({"error": "not_found"}, status=404)
+        builder = getattr(backend.indexer, "build_session_audit", None)
+        if not builder:
+            return self.send_json({"error": "audit_unavailable"}, status=404)
+        audit = builder(session_id)
+        if audit is None:
+            return self.send_json({"error": "audit_unavailable"}, status=404)
+        threshold = int((self._audit_config or {}).get("value_threshold") or VALUE_SCORE_THRESHOLD)
+        ok, reason = meets_cost_guard(int(audit.get("value_score") or 0), threshold)
+        if not ok:
+            return self.send_json({"error": "below_cost_guard", "detail": reason}, status=400)
+        mode = str(data.get("mode") or "auto").strip().lower()
+        llm_input = {k: audit.get(k) for k in LLM_AUDIT_INPUT_FIELDS}
+        config = self._audit_llm_config()
+        if mode == "llm" and not config:
+            return self.send_json({"error": "no_llm_configured", "detail": "Configure --audit-llm-base-url/model or set OPENAI_API_KEY."}, status=400)
+        result = None
+        if mode in ("llm", "auto") and config:
+            try:
+                messages = build_llm_messages(llm_input)
+                raw = call_chat_completions(config, messages)
+                result = parse_llm_json_response(raw, model=config.get("model"))
+            except (LLMError, ValueError) as exc:
+                if mode == "llm":
+                    return self.send_json({"error": "llm_failed", "detail": str(exc)}, status=502)
+        if result is None:
+            result = generate_heuristic_audit(llm_input)
+        store_fn = getattr(backend.indexer, "store_ai_audit", None)
+        if store_fn:
+            store_fn(session_id, result)
+        return self.send_json({"ai_audit": result})
+
+    def handle_audit_delete(self, session_id, backend):
+        if session_id is None:
+            return self.send_json({"error": "not_found"}, status=404)
+        clear_fn = getattr(backend.indexer, "clear_ai_audit", None)
+        if clear_fn:
+            clear_fn(session_id)
+        return self.send_json({"ok": True})
+
+    def _audit_llm_configured(self):
+        cfg = self._audit_config or {}
+        if cfg.get("llm_base_url") and cfg.get("llm_model"):
+            return True
+        for var in ("OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
+            if os.environ.get(var, "").strip():
+                return True
+        return False
+
+    def _audit_llm_config(self):
+        cfg = self._audit_config or {}
+        return detect_provider(
+            base_url=cfg.get("llm_base_url"),
+            model=cfg.get("llm_model"),
+            api_key=cfg.get("llm_api_key"),
+        )
 
     def handle_session_messages(self, session_id, parsed, backend):
         if session_id is None:
@@ -3773,6 +3886,10 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--scan-interval", type=int, default=5)
+    parser.add_argument("--audit-llm-base-url", default=None, help="OpenAI-compatible base URL for AI audit (e.g. http://localhost:11434/v1)")
+    parser.add_argument("--audit-llm-model", default=None, help="Model name for AI audit (e.g. gpt-4o-mini, qwen2.5:7b)")
+    parser.add_argument("--audit-llm-api-key", default=None, help="API key for AI audit (defaults to OPENAI_API_KEY/DEEPSEEK_API_KEY env)")
+    parser.add_argument("--audit-value-threshold", type=int, default=VALUE_SCORE_THRESHOLD, help="Minimum value_score to allow AI audit generation")
     args = parser.parse_args()
 
     codex_dir = Path(args.codex_dir).expanduser()
@@ -3897,6 +4014,12 @@ def main():
         )
 
     static_dir = Path(__file__).resolve().parent / "static"
+    audit_config = {
+        "llm_base_url": args.audit_llm_base_url,
+        "llm_model": args.audit_llm_model,
+        "llm_api_key": args.audit_llm_api_key,
+        "value_threshold": args.audit_value_threshold,
+    }
 
     def handler(*inner_args, **inner_kwargs):
         return Handler(
@@ -3905,6 +4028,7 @@ def main():
             source_backends=source_backends,
             wsl_distro=args.wsl_distro if runtime_system == "windows" else None,
             runtime_system=runtime_system,
+            audit_config=audit_config,
             **inner_kwargs,
         )
 

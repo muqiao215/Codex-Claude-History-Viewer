@@ -49,6 +49,8 @@ const scrollBottomBtn = document.getElementById("scrollBottomBtn");
 const auditPanelEl = document.getElementById("auditPanel");
 const auditActionsEl = document.getElementById("auditActions");
 const auditToggleEl = document.getElementById("auditToggle");
+const auditGenerateBtn = document.getElementById("auditGenerate");
+const auditDeleteBtn = document.getElementById("auditDelete");
 const toolActionsEl = document.getElementById("toolActions");
 const expandAllToolsBtn = document.getElementById("expandAllTools");
 const collapseAllToolsBtn = document.getElementById("collapseAllTools");
@@ -117,6 +119,8 @@ let pinSessionInFlight = false;
 let currentAudit = null;
 let auditFetchSeq = 0;
 let auditCollapsed = false;
+let currentAiAudit = null;
+let auditGenerateInFlight = false;
 let currentFilePathFilter = "";
 let toolsCollapsedByDefault = true;
 let expandedToolIndexes = new Set();
@@ -2262,7 +2266,10 @@ function resetSessionPane() {
     auditPanelEl.innerHTML = "";
   }
   currentAudit = null;
+  currentAiAudit = null;
   auditFetchSeq += 1;
+  if (auditGenerateBtn) auditGenerateBtn.hidden = true;
+  if (auditDeleteBtn) auditDeleteBtn.hidden = true;
   updateMatchNavState("");
 }
 
@@ -2328,16 +2335,20 @@ function renderAuditPanel(audit) {
     auditPanelEl.innerHTML = `<div class="audit-empty muted">Audit unavailable for this source.</div>`;
     return;
   }
-  const html = [
+  const sections = [];
+  if (currentAiAudit) sections.push(_auditSectionAi(currentAiAudit));
+  sections.push(
     _auditSectionIntent(audit),
     _auditSectionOutcome(audit),
     _auditSectionDeliverables(audit),
     _auditSectionCommandIntents(audit),
     _auditSectionFriction(audit),
     _auditSectionValue(audit),
-  ].filter(Boolean).join("");
+  );
+  const html = sections.filter(Boolean).join("");
   auditPanelEl.innerHTML = html ? `<div class="audit-sections">${html}</div>` : `<div class="audit-empty muted">No audit signals.</div>`;
   auditPanelEl.scrollTop = 0;
+  updateAiAuditButtons();
 }
 
 function _auditSection(title, icon, bodyHtml) {
@@ -2472,8 +2483,10 @@ async function fetchAuditPanel(sessionId) {
     const data = await res.json();
     if (seq !== auditFetchSeq) return;
     currentAudit = data.audit || null;
+    currentAiAudit = data.ai_audit || null;
     renderAuditPanel(currentAudit);
     if (auditActionsEl) auditActionsEl.style.display = currentAudit ? "flex" : "none";
+    updateAiAuditButtons();
   } catch (err) {
     if (seq !== auditFetchSeq) return;
     currentAudit = null;
@@ -2489,6 +2502,99 @@ function toggleAuditPanel() {
   if (auditToggleEl) {
     auditToggleEl.textContent = auditCollapsed ? "📊 Show audit" : "📊 Hide audit";
     auditToggleEl.setAttribute("aria-expanded", auditCollapsed ? "false" : "true");
+  }
+}
+
+const AI_STATUS_ICONS = { done: "✓", partial: "◐", skipped: "○", failed: "✕" };
+
+function _auditSectionAi(ai) {
+  const source = String(ai.source || "heuristic");
+  const isLlm = source === "llm";
+  const sourceLabel = isLlm ? `AI Audit · ${escapeHtml(ai.model || "LLM")}` : "Heuristic Audit";
+  const intent = escapeHtml(ai.user_intent || "");
+  const checklistHtml = (ai.checklist || []).map(item => {
+    const status = String(item.status || "skipped");
+    const icon = AI_STATUS_ICONS[status] || "○";
+    const chips = (item.evidence_ids || []).map(eid => {
+      const short = String(eid).split(":").pop() || eid;
+      return `<span class="ai-evidence-chip" data-evidence-id="${escapeHtml(eid)}" title="Jump to evidence">${escapeHtml(short)}</span>`;
+    }).join("");
+    return `<div class="ai-checklist-item ai-status-${escapeHtml(status)}"><span class="ai-status-icon">${icon}</span><span class="ai-checklist-text">${escapeHtml(item.item)}</span>${chips}</div>`;
+  }).join("");
+  const deliverablesHtml = (ai.deliverables || []).map(d => `<li>${escapeHtml(d)}</li>`).join("");
+  const gapsHtml = (ai.gaps || []).map(g => `<li>${escapeHtml(g)}</li>`).join("");
+  const nextAction = escapeHtml(ai.next_action || "");
+  return `<section class="audit-section ai-audit-section">
+    <div class="audit-section-head"><span class="audit-section-icon">🤖</span><span class="audit-section-title">${sourceLabel}</span><span class="ai-source-badge ai-source-${escapeHtml(source)}">${escapeHtml(source)}</span></div>
+    <div class="audit-section-body">
+      <div class="ai-intent">${intent}</div>
+      ${checklistHtml ? `<div class="ai-checklist">${checklistHtml}</div>` : ""}
+      ${deliverablesHtml ? `<div class="ai-subsection"><span class="ai-subsection-label">Deliverables</span><ul class="ai-list">${deliverablesHtml}</ul></div>` : ""}
+      ${gapsHtml ? `<div class="ai-subsection"><span class="ai-subsection-label">Gaps</span><ul class="ai-list ai-gaps">${gapsHtml}</ul></div>` : ""}
+      <div class="ai-next-action"><span class="ai-subsection-label">Next</span><span class="ai-next-action-text">${nextAction}</span></div>
+    </div>
+  </section>`;
+}
+
+function updateAiAuditButtons() {
+  if (!auditGenerateBtn || !auditDeleteBtn) return;
+  if (currentAiAudit) {
+    auditGenerateBtn.hidden = true;
+    auditDeleteBtn.hidden = false;
+  } else {
+    auditGenerateBtn.hidden = false;
+    auditDeleteBtn.hidden = true;
+    const valueScore = Number(currentAudit?.value_score) || 0;
+    auditGenerateBtn.title = valueScore < 20
+      ? `Value ${valueScore} is low — generation may be refused by cost guard.`
+      : "Generate an AI audit judgment for this session.";
+  }
+}
+
+async function generateAiAudit(sessionId) {
+  if (!sessionId || auditGenerateInFlight) return;
+  auditGenerateInFlight = true;
+  if (auditGenerateBtn) {
+    auditGenerateBtn.disabled = true;
+    auditGenerateBtn.textContent = "⏳ Generating…";
+  }
+  try {
+    const res = await fetch(`${apiBase()}/session/${encodeURIComponent(sessionId)}/audit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode: "auto" }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || err.error || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    currentAiAudit = data.ai_audit || null;
+    renderAuditPanel(currentAudit);
+  } catch (err) {
+    alert(`Audit generation failed: ${err?.message || String(err)}`);
+  } finally {
+    auditGenerateInFlight = false;
+    if (auditGenerateBtn) {
+      auditGenerateBtn.disabled = false;
+      auditGenerateBtn.textContent = "🤖 Generate Audit";
+    }
+  }
+}
+
+async function deleteAiAudit(sessionId) {
+  if (!sessionId) return;
+  try {
+    const res = await fetch(`${apiBase()}/session/${encodeURIComponent(sessionId)}/audit/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    currentAiAudit = null;
+    renderAuditPanel(currentAudit);
+  } catch (err) {
+    alert(`Delete failed: ${err?.message || String(err)}`);
   }
 }
 
@@ -3132,6 +3238,17 @@ if (auditToggleEl) {
   });
 }
 
+if (auditGenerateBtn) {
+  auditGenerateBtn.addEventListener("click", () => {
+    if (currentSession?.id) generateAiAudit(currentSession.id);
+  });
+}
+if (auditDeleteBtn) {
+  auditDeleteBtn.addEventListener("click", () => {
+    if (currentSession?.id) deleteAiAudit(currentSession.id);
+  });
+}
+
 if (expandAllToolsBtn) {
   expandAllToolsBtn.addEventListener("click", () => {
     expandAllToolMessages();
@@ -3628,5 +3745,13 @@ if (globalThis.__CCHV_TEST__) {
     renderToolTimeline,
     updateToolTimelineCurrent,
     getToolTimelineElement() { return toolTimelineEl; },
+    auditSectionAi: _auditSectionAi,
+    generateAiAudit,
+    deleteAiAudit,
+    updateAiAuditButtons,
+    setCurrentAiAudit(value) { currentAiAudit = value; },
+    getCurrentAiAudit() { return currentAiAudit; },
+    getAuditGenerateBtn() { return auditGenerateBtn; },
+    getAuditDeleteBtn() { return auditDeleteBtn; },
   };
 }

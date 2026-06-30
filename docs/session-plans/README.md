@@ -8,7 +8,7 @@ Each plan is a self-contained spec: goal, scope, milestones, acceptance criteria
 | # | Plan | Status | Updated | Commit |
 |---|---|---|---|---|
 | 001 | [Agent Value Audit](./001-agent-value-audit.md) | **M1–M3 DONE** · M4–M6 pending | 2026-06-27 | `4462cfb` |
-| 002 | [Detail Panel, Tool Collapse, AI Audit](./002-detail-panel-and-ai-audit.md) | **M4, M5 DONE** · M6 pending | 2026-06-30 | `90e5f09` · M5 `03e6ba0` |
+| 002 | [Detail Panel, Tool Collapse, AI Audit](./002-detail-panel-and-ai-audit.md) | **M4, M5, M6 DONE** · all milestones | 2026-06-30 | `90e5f09` · M5 `03e6ba0` · M6 _pending_ |
 
 ## Status Legend
 
@@ -60,6 +60,18 @@ M5 of plan 002 shipped on 2026-06-30:
 - New CSS classes (`.msg.tool-use`, `.msg.tool-result`, `.msg-tool-summary`, `.msg-tool-status.{ok,error,unknown}`, `.msg-tool-output-truncated`, `.tool-timeline`, `.tool-timeline-dot`) reuse existing theme CSS vars and badge color classes.
 - 42 new backend tests in `tests/test_tool_summary.py` (classification, truncation, diff counting, each summarize function, parser integration); 18 new frontend tests in `tests/test_tool_collapse.js` (summary HTML, toggle, expand/collapse all, truncation). Full suite: 94/94 python green; 45/45 JS green.
 - Demo data: `demo/codex/sessions/2026/02/12/rollout-...-demo-dense-0001.jsonl` — 248 lines, 247 messages, 117 tool calls (16 errors, 101 successes). Exercises the collapse/timeline at spec scale (200+ msgs, 80+ tools).
+
+### Phase 2 — M6 AI Audit Layer (delivered)
+
+M6 of plan 002 shipped on 2026-06-30:
+
+- **Dual-path architecture**: heuristic (zero-config, deterministic, no network) OR LLM (OpenAI-compatible HTTP via urllib when `--audit-llm-{base-url,model,api-key}` or `OPENAI_API_KEY`/`DEEPSEEK_API_KEY` env set; auto-falls back to ollama localhost). Both stored in the existing `audit_json` DB column; UI shows source badge.
+- Backend `audit/ai_audit.py`: `generate_heuristic_audit(llm_input)` derives intent (first_user_prompt, truncated 280ch), checklist (file + command-intent items, capped 12, status from outcome signal, evidence_ids linked), deliverables (deduped paths, capped 20), gaps (errors + outcome + empty-reply detection), next_action (outcome-based). `parse_llm_json_response` strips markdown fences, extracts JSON, validates. `meets_cost_guard` gates LLM calls by `value_score` threshold (default 20).
+- Backend `audit/llm_client.py`: `detect_provider` resolves config from explicit args > env > ollama probe; `call_chat_completions` does urllib POST with `response_format:{type:"json_object"}`.
+- Backend `app.py`: 3 new Indexer methods (`get_stored_ai_audit`/`store_ai_audit`/`clear_ai_audit`); GET `/api/{system}/{source}/session/{id}/audit` extended to return `ai_audit` + `ai_configured`; POST `/audit` (generate) + POST `/audit/delete` (clear); CLI flags `--audit-llm-base-url/--audit-llm-model/--audit-llm-api-key/--audit-value-threshold`.
+- Frontend: `_auditSectionAi(ai)` renders source badge (heuristic muted / llm accent), user_intent, checklist (items with ✓◐○✕ status icons + clickable evidence chips with `data-evidence-id`), deliverables list, gaps list (danger tint), next_action box. Generate/Delete buttons toggle visibility based on `currentAiAudit` state; Generate title warns when `value_score < 20`.
+- CSS `.ai-audit-section`, `.ai-source-badge`, `.ai-checklist-item`, `.ai-status-{done,partial,skipped,failed}`, `.ai-evidence-chip`, `.ai-gaps`, `.ai-next-action` reuse existing theme CSS vars.
+- 41 new backend tests in `tests/test_ai_audit.py` (heuristic shape, intent fallbacks/truncation, checklist cap/evidence, validate schema, parse LLM JSON variants, cost guard, storage round-trip, corrupt JSON); 17 new frontend tests in `tests/test_audit_ai_panel.js` (source badges, status icons, evidence chips, deliverables/gaps omission, button visibility, low-value warning). Full suite: 135/135 python green; all JS suites pass.
 
 ## Conventions
 

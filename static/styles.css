@@ -1006,6 +1006,107 @@ body.is-resizing {
   font-size: 12px;
 }
 
+.ai-audit-section {
+  background: var(--surface-subtle);
+  border-radius: 8px;
+  padding: 2px 0;
+}
+
+.ai-source-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-left: auto;
+}
+.ai-source-heuristic { background: var(--surface-hover); color: var(--muted); }
+.ai-source-llm { background: var(--accent); color: var(--panel); }
+
+.ai-intent {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+
+.ai-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.ai-checklist-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.ai-status-icon {
+  flex-shrink: 0;
+  width: 16px;
+  text-align: center;
+  font-weight: 700;
+}
+.ai-status-done .ai-status-icon { color: #4a9; }
+.ai-status-partial .ai-status-icon { color: #e90; }
+.ai-status-skipped .ai-status-icon { color: var(--muted); }
+.ai-status-failed .ai-status-icon { color: var(--danger-text); }
+
+.ai-checklist-text { flex: 1; word-break: break-word; }
+
+.ai-evidence-chip {
+  display: inline-block;
+  font-size: 10px;
+  font-family: var(--code-font), monospace;
+  padding: 0 4px;
+  margin: 0 1px;
+  border-radius: 3px;
+  background: var(--surface-hover);
+  color: var(--accent);
+  cursor: pointer;
+  border: 1px solid var(--border);
+}
+.ai-evidence-chip:hover { background: var(--accent); color: var(--panel); }
+
+.ai-subsection { margin-top: 6px; }
+.ai-subsection-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  display: block;
+  margin-bottom: 2px;
+}
+
+.ai-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ai-list li { word-break: break-word; }
+.ai-gaps li { color: var(--danger-text); }
+
+.ai-next-action {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--surface-hover);
+  border-left: 3px solid var(--accent);
+}
+.ai-next-action-text {
+  font-size: 12px;
+  font-weight: 600;
+  margin-left: 4px;
+}
+
 .messages-progress {
   display: flex;
   justify-content: center;
