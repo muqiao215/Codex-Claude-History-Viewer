@@ -49,6 +49,10 @@ const scrollBottomBtn = document.getElementById("scrollBottomBtn");
 const auditPanelEl = document.getElementById("auditPanel");
 const auditActionsEl = document.getElementById("auditActions");
 const auditToggleEl = document.getElementById("auditToggle");
+const toolActionsEl = document.getElementById("toolActions");
+const expandAllToolsBtn = document.getElementById("expandAllTools");
+const collapseAllToolsBtn = document.getElementById("collapseAllTools");
+const toolTimelineEl = document.getElementById("toolTimeline");
 const codeThemeButtons = document.querySelectorAll("[data-code-theme]");
 
 let currentSession = null;
@@ -114,6 +118,10 @@ let currentAudit = null;
 let auditFetchSeq = 0;
 let auditCollapsed = false;
 let currentFilePathFilter = "";
+let toolsCollapsedByDefault = true;
+let expandedToolIndexes = new Set();
+let collapsedToolIndexes = new Set();
+let fullToolOutputIndexes = new Set();
 
 if (scrollBottomBtn) {
   const updateScrollBottomBtn = () => {
@@ -1775,6 +1783,166 @@ function buildMessageWindowControl(plan) {
   return wrapper;
 }
 
+// BDD cross-ref (002 §M5): tool_use/tool_result blocks render a one-line summary
+// header and collapse the full body, so a dense transcript stays scannable.
+const TOOL_CATEGORY_META = {
+  shell: { icon: "\u25B6", label: "Shell", cls: "badge-test" },
+  edit: { icon: "\u270E", label: "Edit", cls: "badge-deploy" },
+  read: { icon: "\u{1F441}", label: "Read", cls: "badge-tools" },
+  search: { icon: "\u{1F50D}", label: "Search", cls: "badge-tools" },
+  deploy: { icon: "\u{1F680}", label: "Deploy", cls: "badge-remote" },
+  other: { icon: "\u{1F6E0}", label: "Tool", cls: "badge-tools" },
+};
+
+function isToolMessage(msg) {
+  return msg?.kind === "tool_use" || msg?.kind === "tool_result";
+}
+
+function isToolMessageCollapsed(index) {
+  if (expandedToolIndexes.has(index)) return false;
+  if (collapsedToolIndexes.has(index)) return true;
+  return toolsCollapsedByDefault;
+}
+
+function expandToolMessage(index) {
+  expandedToolIndexes.add(index);
+  collapsedToolIndexes.delete(index);
+}
+
+function collapseToolMessage(index) {
+  collapsedToolIndexes.add(index);
+  expandedToolIndexes.delete(index);
+}
+
+function toggleToolMessage(index) {
+  if (isToolMessageCollapsed(index)) expandToolMessage(index);
+  else collapseToolMessage(index);
+}
+
+function expandAllToolMessages() {
+  toolsCollapsedByDefault = false;
+  expandedToolIndexes = new Set();
+  collapsedToolIndexes = new Set();
+}
+
+function collapseAllToolMessages() {
+  toolsCollapsedByDefault = true;
+  expandedToolIndexes = new Set();
+  collapsedToolIndexes = new Set();
+}
+
+function renderToolStatusHtml(summary) {
+  if (summary.is_error) {
+    return `<span class="msg-tool-status error" title="Error">\u2715</span>`;
+  }
+  const status = summary.exit_status;
+  if (status === "ok") {
+    const code = Number(summary.exit_code);
+    const tip = Number.isFinite(code) ? `Exit ${code}` : "Exit 0";
+    return `<span class="msg-tool-status ok" title="${escapeHtml(tip)}">\u2713</span>`;
+  }
+  if (status === "error") {
+    return `<span class="msg-tool-status error" title="Error">\u2715</span>`;
+  }
+  return `<span class="msg-tool-status unknown" title="Status unknown">\u00B7</span>`;
+}
+
+function renderToolSummaryHtml(msg) {
+  const s = msg?.tool_summary;
+  if (!s || typeof s !== "object") return null;
+  const cat = String(s.category || "other").toLowerCase();
+  const meta = TOOL_CATEGORY_META[cat] || TOOL_CATEGORY_META.other;
+  const name = String(s.name || (msg.kind === "tool_use" ? "tool use" : "tool result"));
+  const headline = s.headline ? escapeHtml(String(s.headline)) : "";
+  const parts = [`<span class="msg-tool-icon ${escapeHtml(meta.cls)}" aria-hidden="true">${meta.icon}</span>`];
+  parts.push(`<span class="msg-tool-name">${escapeHtml(name)}</span>`);
+  if (headline) parts.push(`<span class="msg-tool-headline">${headline}</span>`);
+  if (s.file_path) {
+    parts.push(`<span class="msg-tool-path" title="${escapeHtml(s.file_path)}">${escapeHtml(s.file_path)}</span>`);
+  }
+  const added = Number(s.lines_added) || 0;
+  const removed = Number(s.lines_removed) || 0;
+  const diffParts = [];
+  if (added > 0) diffParts.push(`<span class="msg-tool-diff add">+${added}</span>`);
+  if (removed > 0) diffParts.push(`<span class="msg-tool-diff rem">-${removed}</span>`);
+  if (diffParts.length) parts.push(`<span class="msg-tool-counts">${diffParts.join("")}</span>`);
+  parts.push(renderToolStatusHtml(s));
+  return parts.join("");
+}
+
+function updateToolActionsVisibility() {
+  if (!toolActionsEl) return;
+  const hasTools = currentMessages.some(isToolMessage);
+  toolActionsEl.style.display = hasTools ? "flex" : "none";
+}
+
+function renderToolTimeline() {
+  if (!toolTimelineEl) return;
+  const toolEntries = [];
+  for (let i = 0; i < currentMessages.length; i++) {
+    const msg = currentMessages[i];
+    if (!isToolMessage(msg)) continue;
+    const summary = msg.tool_summary;
+    let statusClass = "unknown";
+    if (summary) {
+      if (summary.is_error) statusClass = "error";
+      else if (summary.exit_status === "ok") statusClass = "ok";
+      else if (summary.exit_status === "error") statusClass = "error";
+    }
+    toolEntries.push({ index: i, statusClass, summary });
+  }
+  if (toolEntries.length === 0) {
+    toolTimelineEl.hidden = true;
+    toolTimelineEl.innerHTML = "";
+    return;
+  }
+  toolTimelineEl.hidden = false;
+  const total = currentMessages.length;
+  let html = "";
+  for (const entry of toolEntries) {
+    const top = total > 1 ? (entry.index / (total - 1)) * 100 : 0;
+    const title = entry.summary
+      ? `${entry.summary.name || "tool"}: ${entry.summary.headline || ""}`
+      : `Tool msg #${entry.index}`;
+    html += `<div class="tool-timeline-dot ${entry.statusClass}" style="top:${top}%;" data-message-index="${entry.index}" title="${escapeHtml(title)}" role="button" tabindex="0" aria-label="Jump to tool call at message ${entry.index}"></div>`;
+  }
+  toolTimelineEl.innerHTML = html;
+}
+
+function updateToolTimelineCurrent(activeIndex) {
+  if (!toolTimelineEl) return;
+  const dots = toolTimelineEl.querySelectorAll(".tool-timeline-dot");
+  dots.forEach((dot) => {
+    if (parseInt(dot.dataset.messageIndex, 10) === activeIndex)
+      dot.classList.add("current");
+    else
+      dot.classList.remove("current");
+  });
+}
+
+const TOOL_OUTPUT_PREVIEW_LINES = 20;
+
+function renderToolMessageBody(body, msg, { index, expanded, searchMatch, term }) {
+  if (msg.kind !== "tool_result") {
+    return renderMessageBodyInto(body, msg, { expanded, searchMatch, term });
+  }
+  const cached = getMessageRenderData(msg);
+  const showFull = fullToolOutputIndexes.has(index);
+  const lines = cached.fullText.split("\n");
+  if (!showFull && lines.length > TOOL_OUTPUT_PREVIEW_LINES) {
+    const previewText = lines.slice(0, TOOL_OUTPUT_PREVIEW_LINES).join("\n");
+    const hiddenCount = lines.length - TOOL_OUTPUT_PREVIEW_LINES;
+    const cacheKey = buildMessageMarkdownCacheKey(msg, "tool-preview", previewText);
+    let html = getOrRenderMarkdownHtml(cacheKey, previewText);
+    html += `<div class="msg-tool-output-truncated muted">${hiddenCount} more line(s) hidden. <button type="button" class="btn small msg-tool-output-toggle" data-tool-output-toggle="${index}">Show all ${lines.length} lines</button></div>`;
+    body.innerHTML = html;
+    body.classList.remove("pending");
+    const hits = term && searchMatch ? highlightElement(body, term) : 0;
+    return { mode: "tool-preview", hits };
+  }
+  return renderMessageBodyInto(body, msg, { expanded, searchMatch, term });
+}
+
 function buildMessageElement(msg, index, term) {
   const roleClass = roleToClass(msg.role);
   const cached = getMessageRenderData(msg);
@@ -1811,6 +1979,13 @@ function buildMessageElement(msg, index, term) {
     if (isToolError) wrapper.classList.add("error");
   }
 
+  const isTool = isToolMessage(msg);
+  const toolCollapsed = isTool && isToolMessageCollapsed(index) && !searchMatch;
+  if (isTool) {
+    wrapper.classList.add(msg.kind === "tool_use" ? "tool-use" : "tool-result");
+    wrapper.classList.add(toolCollapsed ? "tool-collapsed" : "tool-expanded");
+  }
+
   const label = kindLabel(msg.kind) || msg.role;
   const header = document.createElement("div");
   header.className = "msg-header";
@@ -1820,7 +1995,11 @@ function buildMessageElement(msg, index, term) {
   body.className = "msg-body";
   const deferBodyRender = !term;
   let bodyRender = null;
-	  if (deferBodyRender) {
+  if (toolCollapsed) {
+    body.hidden = true;
+  } else if (isTool) {
+    bodyRender = renderToolMessageBody(body, msg, { index, expanded, searchMatch, term });
+  } else if (deferBodyRender) {
     body.classList.add("pending");
     body.textContent = cached.collapsible ? "Rendering preview..." : "Rendering message...";
     queueLazyMessageBody(body, () => {
@@ -1833,11 +2012,24 @@ function buildMessageElement(msg, index, term) {
   const showingSearchExcerpt = bodyRender?.mode === "search-excerpt";
 
   wrapper.appendChild(header);
+  if (isTool) {
+    const summaryBar = document.createElement("div");
+    summaryBar.className = "msg-tool-summary";
+    summaryBar.dataset.toolToggle = String(index);
+    summaryBar.setAttribute("role", "button");
+    summaryBar.setAttribute("tabindex", "0");
+    summaryBar.setAttribute("aria-expanded", String(!toolCollapsed));
+    const chevron = toolCollapsed ? "\u25B6" : "\u25BC";
+    const summaryHtml = renderToolSummaryHtml(msg);
+    const fallback = `<span class="msg-tool-name muted">${escapeHtml(msg.kind === "tool_use" ? "tool use" : "tool result")}</span>`;
+    summaryBar.innerHTML = `<span class="msg-tool-chevron" aria-hidden="true">${chevron}</span>${summaryHtml || fallback}`;
+    wrapper.appendChild(summaryBar);
+  }
   wrapper.appendChild(body);
 
   let hits = bodyRender?.hits || 0;
 
-  if (cached.collapsible) {
+  if (cached.collapsible && !toolCollapsed) {
     const controls = document.createElement("div");
     controls.className = "msg-controls";
 
@@ -1875,6 +2067,8 @@ function buildMessageElement(msg, index, term) {
 }
 
 function renderMessages(messages, { scrollToBottom = false } = {}) {
+  updateToolActionsVisibility();
+  renderToolTimeline();
   cancelPendingMessageRender();
   const containerTop = messagesEl.getBoundingClientRect().top;
   let scrollAnchor = null;
@@ -2043,6 +2237,12 @@ function resetSessionPane() {
   currentMessagesLoadingEarlier = false;
   resetMessageRenderCount();
   expandedMessageIndexes = new Set();
+  toolsCollapsedByDefault = true;
+  expandedToolIndexes = new Set();
+  collapsedToolIndexes = new Set();
+  fullToolOutputIndexes = new Set();
+  if (toolActionsEl) toolActionsEl.style.display = "none";
+  if (toolTimelineEl) { toolTimelineEl.hidden = true; toolTimelineEl.innerHTML = ""; }
   sessionSearchInput.value = "";
   sessionSearchCount.textContent = "";
   currentMarks = [];
@@ -2602,6 +2802,11 @@ async function fetchSession(sessionId) {
   const seq = (sessionFetchSeq += 1);
   currentMessagesLoadingEarlier = false;
   expandedMessageIndexes = new Set();
+  const expandToolsParam = new URLSearchParams(window.location.search).get("expand_tools");
+  toolsCollapsedByDefault = expandToolsParam === "1" ? false : true;
+  expandedToolIndexes = new Set();
+  collapsedToolIndexes = new Set();
+  fullToolOutputIndexes = new Set();
   renderStatusMessage("Loading…");
   try {
     const res = await fetch(`${apiBase()}/session/${encodeURIComponent(sessionId)}`);
@@ -2927,6 +3132,29 @@ if (auditToggleEl) {
   });
 }
 
+if (expandAllToolsBtn) {
+  expandAllToolsBtn.addEventListener("click", () => {
+    expandAllToolMessages();
+    renderMessages(currentMessages);
+  });
+}
+if (collapseAllToolsBtn) {
+  collapseAllToolsBtn.addEventListener("click", () => {
+    collapseAllToolMessages();
+    renderMessages(currentMessages);
+  });
+}
+
+if (toolTimelineEl) {
+  toolTimelineEl.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const dot = target ? target.closest("[data-message-index]") : null;
+    if (!dot) return;
+    const index = Number(dot.dataset.messageIndex);
+    if (Number.isInteger(index)) scrollToMessage(index);
+  });
+}
+
 const clearFileFilterBtn = document.getElementById("clearFileFilter");
 if (clearFileFilterBtn) {
   clearFileFilterBtn.addEventListener("click", () => {
@@ -2998,6 +3226,24 @@ messagesEl.addEventListener("click", async (event) => {
       refreshSessionSearch({ resetRenderCount: false });
     } else {
       await loadEarlierMessages();
+    }
+    return;
+  }
+  const toolOutputToggle = target ? target.closest("[data-tool-output-toggle]") : null;
+  if (toolOutputToggle) {
+    const index = Number(toolOutputToggle.dataset.toolOutputToggle);
+    if (Number.isInteger(index)) {
+      fullToolOutputIndexes.add(index);
+      renderMessages(currentMessages);
+    }
+    return;
+  }
+  const toolToggle = target ? target.closest("[data-tool-toggle]") : null;
+  if (toolToggle) {
+    const index = Number(toolToggle.dataset.toolToggle);
+    if (Number.isInteger(index)) {
+      toggleToolMessage(index);
+      renderMessages(currentMessages);
     }
     return;
   }
@@ -3359,5 +3605,28 @@ if (globalThis.__CCHV_TEST__) {
     setCurrentFilePathFilter(value) { currentFilePathFilter = String(value || ""); },
     getCurrentFilePathFilter() { return currentFilePathFilter; },
     getAuditPanelElement() { return auditPanelEl; },
+    renderToolSummaryHtml,
+    renderToolStatusHtml,
+    isToolMessage,
+    isToolMessageCollapsed,
+    toggleToolMessage,
+    expandToolMessage,
+    collapseToolMessage,
+    expandAllToolMessages,
+    collapseAllToolMessages,
+    setToolsCollapsedByDefault(value) { toolsCollapsedByDefault = !!value; },
+    getToolsCollapsedByDefault() { return toolsCollapsedByDefault; },
+    setExpandedToolIndexes(values) { expandedToolIndexes = new Set(values || []); },
+    getExpandedToolIndexes() { return expandedToolIndexes; },
+    setCollapsedToolIndexes(values) { collapsedToolIndexes = new Set(values || []); },
+    getCollapsedToolIndexes() { return collapsedToolIndexes; },
+    setFullToolOutputIndexes(values) { fullToolOutputIndexes = new Set(values || []); },
+    getFullToolOutputIndexes() { return fullToolOutputIndexes; },
+    getToolActionsElement() { return toolActionsEl; },
+    getToolOutputPreviewLines() { return TOOL_OUTPUT_PREVIEW_LINES; },
+    renderToolMessageBody,
+    renderToolTimeline,
+    updateToolTimelineCurrent,
+    getToolTimelineElement() { return toolTimelineEl; },
   };
 }

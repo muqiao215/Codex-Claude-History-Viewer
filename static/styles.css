@@ -766,8 +766,39 @@ body.is-resizing {
   overflow-y: auto;
   overscroll-behavior: contain;
   flex: 1;
-  min-height: 0;
+  min-width: 0;
 }
+
+.transcript-area {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tool-timeline {
+  width: 24px;
+  flex-shrink: 0;
+  position: relative;
+  background: var(--surface-subtle);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+.tool-timeline[hidden] { display: none; }
+.tool-timeline-dot {
+  position: absolute;
+  left: 6px;
+  width: 12px;
+  min-height: 2px;
+  border-radius: 1px;
+  cursor: pointer;
+  transition: width 0.1s, left 0.1s;
+}
+.tool-timeline-dot:hover { width: 18px; left: 3px; }
+.tool-timeline-dot.ok { background: #4a9; }
+.tool-timeline-dot.error { background: var(--danger-text); }
+.tool-timeline-dot.unknown { background: var(--muted); opacity: 0.5; }
+.tool-timeline-dot.current { outline: 2px solid var(--accent); outline-offset: 1px; z-index: 1; }
 
 .msg {
   border-radius: 10px;
@@ -833,6 +864,146 @@ body.is-resizing {
 
 .msg-toggle {
   flex-shrink: 0;
+}
+
+.msg.tool-use,
+.msg.tool-result {
+  padding: 8px 12px;
+}
+
+.msg.tool-collapsed {
+  padding: 6px 12px;
+}
+
+.msg.tool-collapsed .msg-header {
+  margin-bottom: 0;
+}
+
+.msg-tool-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  cursor: pointer;
+  padding: 4px 6px;
+  margin: 2px 0;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.4;
+  user-select: none;
+}
+
+.msg-tool-summary:hover {
+  background: var(--surface-hover);
+}
+
+.msg-tool-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.msg-tool-chevron {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted);
+  width: 14px;
+  text-align: center;
+}
+
+.msg-tool-icon {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.msg-tool-name {
+  font-family: var(--code-font, monospace);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.msg-tool-headline {
+  font-size: 12px;
+  color: var(--muted);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-tool-path {
+  font-family: var(--code-font, monospace);
+  font-size: 11px;
+  color: var(--muted);
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-tool-counts {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.msg-tool-diff {
+  font-family: var(--code-font, monospace);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.msg-tool-diff.add {
+  color: var(--diff-add-fg, #4a9);
+}
+
+.msg-tool-diff.rem {
+  color: var(--diff-del-fg, #c44);
+}
+
+.msg-tool-status {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 700;
+  width: 18px;
+  text-align: center;
+}
+
+.msg-tool-status.ok {
+  color: #4a9;
+}
+
+.msg-tool-status.error {
+  color: var(--danger-text, #c44);
+}
+
+.msg-tool-status.unknown {
+  color: var(--muted);
+}
+
+.msg-tool-output-truncated {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-top: 1px dashed var(--border);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.msg.tool-result.error .msg-body {
+  border-left: 3px solid var(--danger-border, #c44);
+  padding-left: 8px;
+}
+
+.tool-actions {
+  gap: 6px;
+}
+
+.tool-actions-label {
+  font-size: 12px;
 }
 
 .messages-progress {

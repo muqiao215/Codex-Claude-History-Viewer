@@ -145,10 +145,18 @@
         <div id="auditActions" class="session-actions audit-actions" style="display:none">
           <button id="auditToggle" type="button" class="btn small" aria-expanded="true" aria-controls="auditPanel">📊 Hide audit</button>
         </div>
+        <div id="toolActions" class="session-actions tool-actions" style="display:none">
+          <span class="tool-actions-label muted">Tools:</span>
+          <button id="expandAllTools" type="button" class="btn small" title="Expand all tool blocks">▸ Expand all</button>
+          <button id="collapseAllTools" type="button" class="btn small" title="Collapse all tool blocks">▾ Collapse all</button>
+        </div>
         <section id="auditPanel" class="audit-panel" hidden aria-live="polite"></section>
       </div>
       <div id="headerResizer" class="resizer horizontal" title="Resize header" aria-label="Resize header"></div>
-      <div id="messages" class="messages"></div>
+      <div id="transcriptArea" class="transcript-area">
+        <div id="toolTimeline" class="tool-timeline" hidden aria-label="Tool call timeline"></div>
+        <div id="messages" class="messages"></div>
+      </div>
       <button type="button" id="scrollBottomBtn" class="scroll-bottom-btn" aria-label="Scroll to bottom" title="跳到底部" hidden>↓</button>
     </main>
   </div>

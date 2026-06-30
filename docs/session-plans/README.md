@@ -8,7 +8,7 @@ Each plan is a self-contained spec: goal, scope, milestones, acceptance criteria
 | # | Plan | Status | Updated | Commit |
 |---|---|---|---|---|
 | 001 | [Agent Value Audit](./001-agent-value-audit.md) | **M1–M3 DONE** · M4–M6 pending | 2026-06-27 | `4462cfb` |
-| 002 | [Detail Panel, Tool Collapse, AI Audit](./002-detail-panel-and-ai-audit.md) | **M4 DONE** · M5, M6 pending | 2026-06-28 | `90e5f09` |
+| 002 | [Detail Panel, Tool Collapse, AI Audit](./002-detail-panel-and-ai-audit.md) | **M4, M5 DONE** · M6 pending | 2026-06-30 | `90e5f09` · M5 `<pending>` |
 
 ## Status Legend
 
@@ -47,6 +47,19 @@ M4 of plan 002 shipped on 2026-06-28:
 - Click an evidence-id row → transcript lazy-loads the window if needed, scrolls the target message into view, and flashes the `.audit-flash` highlight (1.6 s).
 - New CSS classes reuse existing theme CSS vars and the existing `.audit-badge` / `.badge-*` chip variants — no new color palette introduced.
 - 9 new backend tests in `tests/test_audit_endpoint.py`; 15 new frontend tests in `tests/test_audit_panel.js`. Full suite: 52/52 python green; 27/27 JS green.
+
+### Phase 2 — M5 Tool Call Collapse Timeline (delivered)
+
+M5 of plan 002 shipped on 2026-06-30:
+
+- Backend attaches a `tool_summary` dict to every `tool_use` / `tool_result` message across all three parsers (codex `function_call`/`function_call_output`, claude `tool_use`/`tool_result` content blocks, openclaw). Summary carries: `name`, `category` (shell/edit/read/search/deploy/other), `headline` (≤80 chars, whitespace-collapsed), `file_path`, `change_kind`, `lines_added`/`lines_removed`, `exit_status` (ok/error/None), `exit_code`, `output_preview` (200 chars), `is_error`. Persisted in a new `tool_summary_json` SQLite column on the codex `messages` table.
+- Frontend renders tool messages **collapsed by default**: a one-line summary bar (chevron + category icon + tool name + headline + file path + diff counts + status badge) replaces the verbose body. Char-collapse controls are suppressed while tool-collapsed; search matches auto-expand.
+- **Expand all / Collapse all** buttons appear in the session header when tool messages are present. URL `?expand_tools=1` flips the default to expanded. Per-block click toggles individual state.
+- Tool results truncate to 20 lines with a "Show all N lines" affordance; stderr-tinted left border on errored results; status badge (✓/✕/·) visible without expanding.
+- **Timeline rail** (aggressive Phase 9 add): a 24px-wide strip left of the transcript renders one colored dot per tool message — green (ok), red (error), muted (unknown / pre-result). Dot vertical position is proportional to message index; click jumps to that message.
+- New CSS classes (`.msg.tool-use`, `.msg.tool-result`, `.msg-tool-summary`, `.msg-tool-status.{ok,error,unknown}`, `.msg-tool-output-truncated`, `.tool-timeline`, `.tool-timeline-dot`) reuse existing theme CSS vars and badge color classes.
+- 42 new backend tests in `tests/test_tool_summary.py` (classification, truncation, diff counting, each summarize function, parser integration); 18 new frontend tests in `tests/test_tool_collapse.js` (summary HTML, toggle, expand/collapse all, truncation). Full suite: 94/94 python green; 45/45 JS green.
+- Demo data: `demo/codex/sessions/2026/02/12/rollout-...-demo-dense-0001.jsonl` — 248 lines, 247 messages, 117 tool calls (16 errors, 101 successes). Exercises the collapse/timeline at spec scale (200+ msgs, 80+ tools).
 
 ## Conventions
 

@@ -505,6 +505,291 @@ def _codex_format_tool_result(tool_name=None, call_id=None, raw_output=None):
     return "\n".join(lines).strip()
 
 
+# BDD: spec docs/session-plans/002 §M5 — every tool_use/tool_result message
+# carries a structured `tool_summary` so the transcript UI can render collapsed
+# one-line rows without re-parsing the raw text.
+_TOOL_CATEGORY_MAP = {
+    "shell_command": "shell", "bash": "shell", "powershell": "shell", "cmd": "shell", "sh": "shell",
+    "apply_patch": "edit", "str_replace_editor": "edit", "write": "edit", "edit": "edit",
+    "multi_edit": "edit", "create_file": "edit", "delete_file": "edit",
+    "read_file": "read", "read": "read", "get_file_contents": "read", "view": "read",
+    "grep": "search", "glob": "search", "search": "search", "find": "search",
+    "webfetch": "deploy", "web_search": "deploy", "curl": "deploy",
+    "todo_write": "deploy", "update_plan": "deploy", "task": "deploy",
+    "askuserquestion": "deploy",
+}
+
+
+def _classify_tool_category(name):
+    key = str(name or "").lower().strip()
+    if not key:
+        return "other"
+    if key in _TOOL_CATEGORY_MAP:
+        return _TOOL_CATEGORY_MAP[key]
+    if key.startswith("text_editor"):
+        return "edit"
+    return "other"
+
+
+def _truncate_str(text, max_len):
+    if text is None:
+        return None
+    s = " ".join(str(text).split())
+    if not s:
+        return None
+    if len(s) > max_len:
+        return s[: max_len - 1] + "…"
+    return s
+
+
+def _empty_tool_summary(name):
+    return {
+        "name": str(name or "tool")[:80],
+        "category": _classify_tool_category(name),
+        "headline": None,
+        "file_path": None,
+        "change_kind": None,
+        "lines_added": None,
+        "lines_removed": None,
+        "exit_status": None,
+        "exit_code": None,
+        "output_preview": None,
+        "is_error": False,
+    }
+
+
+def _count_diff_lines(patch_text):
+    # ALGO: count +/- lines inside @@ hunks, skipping +++/---/*** file markers.
+    added = 0
+    removed = 0
+    in_hunk = False
+    for line in patch_text.splitlines():
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        if line.startswith(("+++", "---", "***")):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed
+
+
+def _codex_summarize_tool_use(name, raw_input=None, *, is_custom=False):
+    s = _empty_tool_summary(name)
+    parsed = _codex_try_parse_json(raw_input) if isinstance(raw_input, str) else None
+    cat = s["category"]
+    if cat == "shell" and isinstance(parsed, dict):
+        cmd = parsed.get("command")
+        if isinstance(cmd, str) and cmd.strip():
+            s["headline"] = _truncate_str(cmd, 80)
+        wd = parsed.get("workdir")
+        if isinstance(wd, str) and wd.strip():
+            s["file_path"] = wd.strip()
+    elif cat == "edit":
+        if str(name or "").lower() == "apply_patch" and isinstance(raw_input, str):
+            body = raw_input.strip()
+            current_path = None
+            change_kind = None
+            for line in body.splitlines():
+                if not line.startswith("*** "):
+                    continue
+                marker = line[4:].strip()
+                for prefix, kind in (
+                    ("Add File:", "create"),
+                    ("Delete File:", "delete"),
+                    ("Update File:", "modify"),
+                    ("Modified File:", "modify"),
+                ):
+                    if marker.startswith(prefix):
+                        change_kind = kind
+                        current_path = marker[len(prefix):].strip()
+                        break
+                if change_kind:
+                    break
+            if current_path:
+                s["file_path"] = current_path
+            if change_kind:
+                s["change_kind"] = change_kind
+            added, removed = _count_diff_lines(body)
+            s["lines_added"] = added
+            s["lines_removed"] = removed
+            if current_path and change_kind:
+                s["headline"] = _truncate_str(f"{change_kind} {current_path}", 80)
+        elif isinstance(parsed, dict):
+            path = parsed.get("path") or parsed.get("file_path")
+            if isinstance(path, str) and path.strip():
+                s["file_path"] = path.strip()
+            cmd = parsed.get("command")
+            if isinstance(cmd, str) and cmd.strip():
+                key = cmd.lower().strip()
+                s["change_kind"] = "create" if key == "create" else "delete" if key == "delete" else "modify"
+            if s["file_path"] and s["change_kind"]:
+                s["headline"] = _truncate_str(f"{s['change_kind']} {s['file_path']}", 80)
+    elif cat == "read" and isinstance(parsed, dict):
+        path = parsed.get("path") or parsed.get("file_path")
+        if isinstance(path, str) and path.strip():
+            s["file_path"] = path.strip()
+            s["headline"] = _truncate_str(path.strip(), 80)
+    elif cat == "search" and isinstance(parsed, dict):
+        pattern = parsed.get("pattern")
+        path = parsed.get("path")
+        parts = []
+        if isinstance(pattern, str) and pattern.strip():
+            parts.append(pattern.strip())
+        if isinstance(path, str) and path.strip():
+            parts.append(f"in {path.strip()}")
+        if parts:
+            s["headline"] = _truncate_str(" ".join(parts), 80)
+    elif cat == "deploy" and isinstance(parsed, dict):
+        url = parsed.get("url") or parsed.get("query") or parsed.get("prompt")
+        if isinstance(url, str) and url.strip():
+            s["headline"] = _truncate_str(url.strip(), 80)
+        elif str(name or "").lower() in ("todo_write", "update_plan"):
+            todos = parsed.get("todos")
+            if isinstance(todos, list):
+                s["headline"] = f"plan: {len(todos)} items"
+    if s["headline"] is None and isinstance(parsed, dict) and parsed:
+        for k, v in list(parsed.items())[:1]:
+            if v is not None and v != "":
+                s["headline"] = _truncate_str(f"{k}: {v}", 80)
+                break
+    return s
+
+
+def _codex_summarize_tool_result(tool_name=None, raw_output=None):
+    s = _empty_tool_summary(tool_name or "tool")
+    if not isinstance(raw_output, str) or not raw_output.strip():
+        return s
+    parsed = _codex_try_parse_json(raw_output)
+    exit_code = None
+    body = None
+    if isinstance(parsed, dict) and ("output" in parsed or "metadata" in parsed):
+        meta = parsed.get("metadata")
+        if isinstance(meta, dict):
+            code = meta.get("exit_code")
+            if isinstance(code, (int, float)):
+                exit_code = int(code)
+        out = parsed.get("output")
+        if isinstance(out, str):
+            body = out.strip("\n")
+        elif out is not None:
+            body = json.dumps(out, ensure_ascii=False)
+    else:
+        m = re.search(r"^Exit code:\s*(-?\d+)\s*$", raw_output, re.M)
+        if m:
+            exit_code = int(m.group(1))
+        if "\nOutput:\n" in raw_output:
+            _, body_part = raw_output.split("\nOutput:\n", 1)
+            body = body_part.strip("\n")
+        else:
+            body = raw_output.strip("\n")
+    if exit_code is not None:
+        s["exit_code"] = exit_code
+        s["exit_status"] = "ok" if exit_code == 0 else "error"
+        s["is_error"] = exit_code != 0
+    if body:
+        s["output_preview"] = _truncate_str(body, 200)
+    return s
+
+
+def _claude_summarize_tool_use(item):
+    name = item.get("name") if isinstance(item, dict) else None
+    s = _empty_tool_summary(name)
+    tool_input = item.get("input") if isinstance(item, dict) and isinstance(item.get("input"), dict) else None
+    if not tool_input:
+        return s
+    cat = s["category"]
+    if cat == "shell":
+        cmd = tool_input.get("command")
+        if isinstance(cmd, str) and cmd.strip():
+            s["headline"] = _truncate_str(cmd, 80)
+    elif cat == "edit":
+        path = tool_input.get("file_path") or tool_input.get("path")
+        if isinstance(path, str) and path.strip():
+            s["file_path"] = path.strip()
+        cmd = tool_input.get("command")
+        if isinstance(cmd, str) and cmd.strip():
+            key = cmd.lower().strip()
+            s["change_kind"] = "create" if key == "create" else "delete" if key == "delete" else "modify"
+        new_s = tool_input.get("new_str") or tool_input.get("new_string") or tool_input.get("file_text")
+        old_s = tool_input.get("old_str") or tool_input.get("old_string")
+        if isinstance(new_s, str) or isinstance(old_s, str):
+            s["lines_added"] = len([ln for ln in (new_s or "").splitlines() if ln.strip()])
+            s["lines_removed"] = len([ln for ln in (old_s or "").splitlines() if ln.strip()])
+        if s["file_path"] and s["change_kind"]:
+            s["headline"] = _truncate_str(f"{s['change_kind']} {s['file_path']}", 80)
+    elif cat == "read":
+        path = tool_input.get("file_path") or tool_input.get("path")
+        if isinstance(path, str) and path.strip():
+            s["file_path"] = path.strip()
+            s["headline"] = _truncate_str(path.strip(), 80)
+    elif cat == "search":
+        pattern = tool_input.get("pattern")
+        path = tool_input.get("path")
+        parts = []
+        if isinstance(pattern, str) and pattern.strip():
+            parts.append(pattern.strip())
+        if isinstance(path, str) and path.strip():
+            parts.append(f"in {path.strip()}")
+        if parts:
+            s["headline"] = _truncate_str(" ".join(parts), 80)
+    elif cat == "deploy":
+        url = tool_input.get("url") or tool_input.get("query") or tool_input.get("prompt")
+        if isinstance(url, str) and url.strip():
+            s["headline"] = _truncate_str(url.strip(), 80)
+        elif str(name or "").lower() == "todo_write":
+            todos = tool_input.get("todos")
+            if isinstance(todos, list):
+                s["headline"] = f"plan: {len(todos)} items"
+    if s["headline"] is None:
+        for k, v in list(tool_input.items())[:1]:
+            if v is not None and v != "":
+                s["headline"] = _truncate_str(f"{k}: {v}", 80)
+                break
+    return s
+
+
+def _claude_summarize_tool_result(tool_result_item, tool_use_result=None):
+    s = _empty_tool_summary("tool")
+    is_error = None
+    content = None
+    if isinstance(tool_result_item, dict):
+        is_error = tool_result_item.get("is_error")
+        content = tool_result_item.get("content")
+    stdout = None
+    stderr = None
+    if isinstance(tool_use_result, dict):
+        stdout = tool_use_result.get("stdout")
+        stderr = tool_use_result.get("stderr")
+    if is_error is True:
+        s["exit_status"] = "error"
+        s["is_error"] = True
+    elif is_error is False:
+        s["exit_status"] = "ok"
+        s["is_error"] = False
+    body = None
+    if isinstance(content, str) and content.strip():
+        body = content.strip()
+    elif isinstance(stdout, str) or isinstance(stderr, str):
+        combined = ""
+        if isinstance(stdout, str) and stdout:
+            combined += stdout
+        if isinstance(stderr, str) and stderr:
+            if combined and not combined.endswith("\n"):
+                combined += "\n"
+            combined += stderr
+        body = combined.strip() or None
+    elif content is not None:
+        body = json.dumps(content, ensure_ascii=False)
+    if body:
+        s["output_preview"] = _truncate_str(body, 200)
+    return s
+
+
 def parse_codex_session_file(path: Path):
     session_id = None
     start_ts_ms = None
@@ -623,6 +908,7 @@ def parse_codex_session_file(path: Path):
                                 "role": "tool",
                                 "kind": "tool_use",
                                 "text": text,
+                                "tool_summary": _codex_summarize_tool_use(name, raw_input, is_custom=(payload_type == "custom_tool_call")),
                             })
                             add_search(text)
                     elif payload_type in ("function_call_output", "custom_tool_call_output"):
@@ -638,6 +924,7 @@ def parse_codex_session_file(path: Path):
                                 "role": "tool",
                                 "kind": "tool_result",
                                 "text": text,
+                                "tool_summary": _codex_summarize_tool_result(name, raw_output=raw_output),
                             })
                             add_search(text)
                     else:
@@ -852,16 +1139,19 @@ def parse_claude_session_file(path: Path):
         search_parts.append(text)
         search_len += len(text)
 
-    def add_message(ts_ms, role, kind, text, count_for_stats=False):
+    def add_message(ts_ms, role, kind, text, count_for_stats=False, tool_summary=None):
         nonlocal message_count, title
         if not text:
             return
-        messages.append({
+        msg = {
             "ts_ms": ts_ms,
             "role": role,
             "kind": kind,
             "text": text,
-        })
+        }
+        if isinstance(tool_summary, dict):
+            msg["tool_summary"] = tool_summary
+        messages.append(msg)
         add_search(text)
         if count_for_stats:
             message_count += 1
@@ -924,7 +1214,7 @@ def parse_claude_session_file(path: Path):
                             item_type = item.get("type")
                             if item_type == "tool_result":
                                 text = _claude_format_tool_result(item, tool_use_result=tool_use_result)
-                                add_message(ts_ms, "tool", "tool_result", text, count_for_stats=False)
+                                add_message(ts_ms, "tool", "tool_result", text, count_for_stats=False, tool_summary=_claude_summarize_tool_result(item, tool_use_result=tool_use_result))
                                 continue
                             text = _claude_extract_text_item(item)
                             if text:
@@ -954,7 +1244,7 @@ def parse_claude_session_file(path: Path):
                                 continue
                             if item_type == "tool_use":
                                 text = _claude_format_tool_use(item)
-                                add_message(ts_ms, "tool", "tool_use", text, count_for_stats=False)
+                                add_message(ts_ms, "tool", "tool_use", text, count_for_stats=False, tool_summary=_claude_summarize_tool_use(item))
                                 continue
 
                             text = _claude_extract_text_item(item)
@@ -1065,6 +1355,67 @@ def _openclaw_format_tool_result(message):
     return "\n".join(lines).strip()
 
 
+def _openclaw_summarize_tool_use(item):
+    if not isinstance(item, dict):
+        return _empty_tool_summary("tool")
+    name = item.get("name") or "tool"
+    arguments = item.get("arguments")
+    if arguments is None:
+        raw_input = None
+    elif isinstance(arguments, str):
+        raw_input = arguments
+    else:
+        raw_input = json.dumps(arguments, ensure_ascii=False)
+    return _codex_summarize_tool_use(name, raw_input)
+
+
+def _openclaw_summarize_tool_result(message):
+    s = _empty_tool_summary("tool")
+    if not isinstance(message, dict):
+        return s
+    tool_name = message.get("toolName")
+    if isinstance(tool_name, str) and tool_name.strip():
+        s["name"] = tool_name.strip()[:80]
+        s["category"] = _classify_tool_category(tool_name)
+    is_error = message.get("isError")
+    details = message.get("details") if isinstance(message.get("details"), dict) else None
+    content = message.get("content")
+    status = None
+    exit_code = None
+    if is_error is True:
+        status = "error"
+    elif is_error is False:
+        status = "ok"
+    if details:
+        detail_status = str(details.get("status") or "").strip().lower()
+        if detail_status in ("completed", "ok", "success") and status is None:
+            status = "ok"
+        elif detail_status in ("error", "failed", "failure") and status is None:
+            status = "error"
+        if isinstance(details.get("exitCode"), (int, float)):
+            exit_code = int(details["exitCode"])
+    if exit_code is not None:
+        s["exit_code"] = exit_code
+        if status is None:
+            status = "ok" if exit_code == 0 else "error"
+    if status == "error":
+        s["exit_status"] = "error"
+        s["is_error"] = True
+    elif status == "ok":
+        s["exit_status"] = "ok"
+        s["is_error"] = False
+    body = None
+    if isinstance(content, str):
+        body = content.strip()
+    elif isinstance(content, list):
+        body = extract_text(content).strip()
+    elif details:
+        body = json.dumps(details, ensure_ascii=False)
+    if body:
+        s["output_preview"] = _truncate_str(body, 200)
+    return s
+
+
 def parse_openclaw_session_file(path: Path):
     session_id = None
     start_ts_ms = None
@@ -1088,19 +1439,22 @@ def parse_openclaw_session_file(path: Path):
         search_parts.append(text)
         search_len += len(text)
 
-    def add_message(ts_ms, role, kind, text, count_for_stats=False):
+    def add_message(ts_ms, role, kind, text, count_for_stats=False, tool_summary=None):
         nonlocal message_count, title
         if not text:
             return
         cleaned = text.strip()
         if not cleaned:
             return
-        messages.append({
+        msg = {
             "ts_ms": ts_ms,
             "role": role,
             "kind": kind,
             "text": cleaned,
-        })
+        }
+        if isinstance(tool_summary, dict):
+            msg["tool_summary"] = tool_summary
+        messages.append(msg)
         add_search(cleaned)
         if count_for_stats:
             message_count += 1
@@ -1187,7 +1541,7 @@ def parse_openclaw_session_file(path: Path):
                                 add_message(ts_ms, "other", "thinking", item.get("thinking"), count_for_stats=False)
                                 continue
                             if item_type in ("toolCall", "tool_use"):
-                                add_message(ts_ms, "tool", "tool_use", _openclaw_format_tool_use(item), count_for_stats=False)
+                                add_message(ts_ms, "tool", "tool_use", _openclaw_format_tool_use(item), count_for_stats=False, tool_summary=_openclaw_summarize_tool_use(item))
                                 continue
                             text = _claude_extract_text_item(item)
                             if text:
@@ -1197,7 +1551,7 @@ def parse_openclaw_session_file(path: Path):
                     continue
 
                 if role in ("toolResult", "tool_result", "tool"):
-                    add_message(ts_ms, "tool", "tool_result", _openclaw_format_tool_result(message), count_for_stats=False)
+                    add_message(ts_ms, "tool", "tool_result", _openclaw_format_tool_result(message), count_for_stats=False, tool_summary=_openclaw_summarize_tool_result(message))
                     continue
 
                 if isinstance(content, str):
@@ -1328,6 +1682,10 @@ class Indexer:
             except sqlite3.OperationalError:
                 pass
             patch_db_for_audit(self.conn)
+            try:
+                cur.execute("ALTER TABLE messages ADD COLUMN tool_summary_json TEXT")
+            except sqlite3.OperationalError:
+                pass
             self.conn.commit()
 
     def maybe_update_index(self, max_age_seconds=None):
@@ -1425,8 +1783,8 @@ class Indexer:
                 if messages:
                     self.conn.executemany(
                         """
-                        INSERT INTO messages (session_id, ts_ms, role, kind, text)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO messages (session_id, ts_ms, role, kind, text, tool_summary_json)
+                        VALUES (?, ?, ?, ?, ?, ?)
                         """,
                         [
                             (
@@ -1435,6 +1793,7 @@ class Indexer:
                                 m["role"],
                                 m["kind"],
                                 m["text"],
+                                json.dumps(m["tool_summary"]) if isinstance(m.get("tool_summary"), dict) else None,
                             )
                             for m in messages
                         ],
@@ -1681,7 +2040,14 @@ class Indexer:
             char_count=row["char_count"] if "char_count" in row.keys() else None,
             is_truncated=row["is_truncated"] if "is_truncated" in row.keys() else None,
         )
-        return {
+        tool_summary = None
+        raw_ts = row["tool_summary_json"] if "tool_summary_json" in row.keys() else None
+        if raw_ts:
+            try:
+                tool_summary = json.loads(raw_ts)
+            except (ValueError, TypeError):
+                tool_summary = None
+        result = {
             "message_index": int(message_index),
             "ts_ms": row["ts_ms"],
             "role": row["role"],
@@ -1690,6 +2056,9 @@ class Indexer:
             "char_count": char_count,
             "is_truncated": bool(is_truncated),
         }
+        if tool_summary is not None:
+            result["tool_summary"] = tool_summary
+        return result
 
     def get_session_metadata(self, session_id):
         with self.lock:
@@ -1732,7 +2101,8 @@ class Indexer:
                     CASE
                         WHEN LENGTH(text) > ? THEN 1
                         ELSE 0
-                    END AS is_truncated
+                    END AS is_truncated,
+                    tool_summary_json
                 FROM messages
                 WHERE session_id = ?
                 ORDER BY ts_ms ASC, id ASC
@@ -1808,7 +2178,7 @@ class Indexer:
                 return None
             row = self.conn.execute(
                 """
-                SELECT ts_ms, role, kind, text
+                SELECT ts_ms, role, kind, text, tool_summary_json
                 FROM messages
                 WHERE session_id = ?
                 ORDER BY ts_ms ASC, id ASC
@@ -1842,7 +2212,7 @@ class Indexer:
                 return None
             rows = self.conn.execute(
                 """
-                SELECT ts_ms, role, kind, text
+                SELECT ts_ms, role, kind, text, tool_summary_json
                 FROM messages
                 WHERE session_id = ?
                 ORDER BY ts_ms ASC, id ASC
