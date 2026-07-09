@@ -2607,7 +2607,7 @@ class HermesStateIndexer:
             (session_id,),
         ).fetchone()
 
-    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None):
+    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None, file_path=None):
         clean_limit, clean_offset = normalize_page_args(limit, offset)
         terms = [t for t in str(q or "").split() if t]
 
@@ -3133,7 +3133,7 @@ class OpenCodeIndexer:
         flat = self._load_flat_messages(session_id)
         return len(flat)
 
-    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None):
+    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None, file_path=None):
         clean_limit, clean_offset = normalize_page_args(limit, offset)
         terms = [t for t in str(q or "").split() if t]
 

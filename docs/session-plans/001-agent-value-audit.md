@@ -1,5 +1,5 @@
-> **Status (2026-06-27)**: M1 ✅ · M2 ✅ · M3 ✅ — delivered in commit `4462cfb`. Backend `audit/` package + SQLite migration + sidebar badges + value sort all live; full suite 43/43 green.
-> M4 / M5 / M6 still pending — see [`002-detail-panel-and-ai-audit.md`](./002-detail-panel-and-ai-audit.md) for the next phase.
+> **Status (2026-06-27)**: M1 ✅ · M2 ✅ · M3 ✅ — delivered in commit `4462cfb`. Backend `audit/` package + SQLite migration + sidebar badges + value sort all live.
+> M4 ✅ · M5 ✅ · M6 ✅ — delivered in [`002-detail-panel-and-ai-audit.md`](./002-detail-panel-and-ai-audit.md) (commits `90e5f09`, `03e6ba0`, `c602340`).
 >
 > **Scope note**: OpenCode was added as a 5th read-only source in the same commit (mirrors the Hermes contract over `opencode.db`). OpenCode/Hermes sessions emit neutral audit defaults because they have no JSONL transcript to mine.
 

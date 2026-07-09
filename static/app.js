@@ -799,7 +799,11 @@ function applyStoredSourceContext() {
     savedSystem = null;
     savedSource = null;
   }
-  setCurrentSystem(savedSystem || runtimeSystem, { persist: false });
+  const candidateSystem = savedSystem || runtimeSystem;
+  const resolvedSystem = (availableSystems.length === 0 || availableSystems.includes(candidateSystem))
+    ? candidateSystem
+    : runtimeSystem;
+  setCurrentSystem(resolvedSystem, { persist: false });
   setCurrentSource(savedSource || currentSource, { persist: false });
 }
 
