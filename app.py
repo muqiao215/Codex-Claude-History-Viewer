@@ -3247,8 +3247,8 @@ class OpenCodeIndexer:
         window = flat[clean_offset:clean_offset + clean_limit]
         return {
             "messages": [
-                self._serialize_message_row(row, clean_offset + idx)
-                for idx, row in enumerate(messages)
+                self._serialize_flat_message(row, clean_offset + idx)
+                for idx, row in enumerate(window)
             ],
             "offset": clean_offset,
             "limit": clean_limit,
