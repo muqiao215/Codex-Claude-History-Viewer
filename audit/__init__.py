@@ -19,13 +19,13 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .extractor import extract_session_audit, make_evidence_id
+from .extractor import build_audit_from_events, extract_session_audit, make_evidence_id
 from .schema import AuditPayload, to_llm_audit_input
 
 # Bump when the payload shape / scoring formula changes enough that cached
 # audits should be regenerated. The Indexer compares this against the stored
 # ``audit_version`` column to decide whether to re-extract.
-AUDIT_VERSION = 1
+AUDIT_VERSION = 2
 
 # Audit-related columns added to the existing ``sessions`` table (plan 16.1).
 AUDIT_COLUMNS = {
@@ -138,6 +138,7 @@ __all__ = [
     "AUDIT_VERSION",
     "AUDIT_COLUMNS",
     "AuditPayload",
+    "build_audit_from_events",
     "build_audit_for_file",
     "deserialize_audit_summary",
     "extract_session_audit",

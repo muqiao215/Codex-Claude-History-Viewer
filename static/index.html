@@ -144,6 +144,11 @@
         </div>
         <div id="auditActions" class="session-actions audit-actions" style="display:none">
           <button id="auditToggle" type="button" class="btn small" aria-expanded="true" aria-controls="auditPanel">📊 Hide audit</button>
+          <select id="handoffDetail" class="handoff-detail" aria-label="Handoff detail">
+            <option value="compact">Compact</option>
+            <option value="standard" selected>Standard</option>
+          </select>
+          <button id="copyHandoff" type="button" class="btn small" title="Copy agent handoff" aria-label="Copy agent handoff">📋 Handoff</button>
           <button id="auditGenerate" type="button" class="btn small" hidden aria-label="Generate AI audit">🤖 Generate Audit</button>
           <button id="auditDelete" type="button" class="btn small danger" hidden aria-label="Delete AI audit">🗑️ Delete Audit</button>
         </div>

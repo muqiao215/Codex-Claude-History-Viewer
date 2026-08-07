@@ -111,7 +111,10 @@ class AuditEvent:
     tool_args: Any = None  # dict or raw string
     tool_result_error: Optional[bool] = None
     tool_result_text: str = ""
+    tool_result_exit_codes: List[int] = field(default_factory=list)
+    tool_result_items: List[str] = field(default_factory=list)
     line_no: Optional[int] = None
+    message_index: Optional[int] = None
 
 
 @dataclass
@@ -129,6 +132,8 @@ class AuditPayload:
     last_user_prompt: str = ""
     important_user_prompts: List[str] = field(default_factory=list)
     last_assistant_reply: str = ""
+    last_assistant_before_last_user: str = ""
+    has_assistant_after_last_user: bool = False
 
     message_count: Dict[str, int] = field(default_factory=dict)
     tools_used: Dict[str, int] = field(default_factory=dict)
@@ -139,6 +144,7 @@ class AuditPayload:
     file_mutation_stats: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     command_intents: Dict[str, int] = field(default_factory=dict)
+    commands: List[Dict[str, Any]] = field(default_factory=list)
     remote_context: Dict[str, Any] = field(default_factory=dict)
     errors: Dict[str, Any] = field(default_factory=lambda: {"count": 0, "samples": []})
 
@@ -162,6 +168,8 @@ class AuditPayload:
             "last_user_prompt": self.last_user_prompt,
             "important_user_prompts": list(self.important_user_prompts),
             "last_assistant_reply": self.last_assistant_reply,
+            "last_assistant_before_last_user": self.last_assistant_before_last_user,
+            "has_assistant_after_last_user": bool(self.has_assistant_after_last_user),
             "message_count": dict(self.message_count),
             "tools_used": dict(self.tools_used),
             "files_touched": {
@@ -171,6 +179,7 @@ class AuditPayload:
                 k: dict(v) for k, v in self.file_mutation_stats.items()
             },
             "command_intents": dict(self.command_intents),
+            "commands": [dict(item) for item in self.commands],
             "remote_context": dict(self.remote_context),
             "errors": dict(self.errors),
             "outcome_signal": self.outcome_signal,

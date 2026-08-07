@@ -563,6 +563,16 @@ body.is-resizing {
 }
 .audit-panel[hidden] { display: none; }
 .audit-actions { margin-top: 4px; }
+.handoff-detail {
+  min-height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 5px;
+}
 .audit-loading,
 .audit-empty,
 .audit-error {

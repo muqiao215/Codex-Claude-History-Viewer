@@ -275,7 +275,7 @@ class DbIntegrationTests(unittest.TestCase):
         self.assertIn("audit_version", cols)
 
     def test_audit_version_constant_matches(self):
-        self.assertEqual(AUDIT_VERSION, 1)
+        self.assertEqual(AUDIT_VERSION, 2)
 
     def test_serialize_deserialize_roundtrip(self):
         tmp = tempfile.TemporaryDirectory()

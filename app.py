@@ -16,11 +16,13 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 from audit import (
     AUDIT_VERSION,
+    build_audit_from_events,
     build_audit_for_file,
     deserialize_audit_summary,
     patch_db_for_audit,
     serialize_audit_fields,
 )
+from audit.schema import AuditEvent
 from audit.ai_audit import (
     VALUE_SCORE_THRESHOLD,
     build_llm_messages,
@@ -29,6 +31,7 @@ from audit.ai_audit import (
     parse_llm_json_response,
 )
 from audit.llm_client import LLMError, call_chat_completions, detect_provider
+from audit.handoff import build_handoff_bundle
 from audit.schema import LLM_AUDIT_INPUT_FIELDS
 
 MAX_SEARCH_CHARS = 2_000_000
@@ -2923,6 +2926,7 @@ class OpenCodeIndexer:
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         self._session_preview_cache = OrderedDict()
+        self._audit_cache = OrderedDict()
 
     def _remember_session_preview_cache(self, session_id, payload):
         key = str(session_id or "")
@@ -2961,9 +2965,9 @@ class OpenCodeIndexer:
         model = model or "OpenCode"
         return f"{model} - {str(row['id'])[:8]}"
 
-    def _serialize_session_row(self, row):
+    def _serialize_session_row(self, row, audit=None):
         cwd = str(row["directory"] or "").strip() or "(unknown directory)"
-        return {
+        item = {
             "id": row["id"],
             "start_ts_ms": parse_ts(row["time_created"]),
             "end_ts_ms": parse_ts(row["time_updated"]),
@@ -2973,6 +2977,28 @@ class OpenCodeIndexer:
             "pinned": 0,
             **_neutral_audit_summary(),
         }
+        if audit:
+            item.update({
+                "files_touched": audit.get("files_touched") or {"local": [], "remote": [], "inferred": []},
+                "tools_used": audit.get("tools_used") or {},
+                "command_intents": audit.get("command_intents") or {},
+                "remote_context": audit.get("remote_context") or {},
+                "outcome_signal": audit.get("outcome_signal") or "unknown",
+                "value_score": int(audit.get("value_score") or 0),
+                "friction_score": int(audit.get("friction_score") or 0),
+                "action_density": float(audit.get("action_density") or 0.0),
+            })
+        return item
+
+    @staticmethod
+    def _model_id(raw_model):
+        try:
+            model = json.loads(raw_model) if isinstance(raw_model, str) else raw_model
+        except (json.JSONDecodeError, TypeError):
+            model = None
+        if isinstance(model, dict):
+            return str(model.get("id") or model.get("modelID") or model.get("model") or "")
+        return str(model or "")
 
     @staticmethod
     def _parse_data(raw):
@@ -2990,6 +3016,17 @@ class OpenCodeIndexer:
         except (json.JSONDecodeError, TypeError):
             return None
         return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _tool_input_paths(tool_input):
+        if not isinstance(tool_input, dict):
+            return []
+        paths = []
+        for key in ("file_path", "filePath", "path", "filename", "target_file", "file"):
+            value = tool_input.get(key)
+            if isinstance(value, str) and value.strip() and value.strip() not in paths:
+                paths.append(value.strip())
+        return paths
 
     @staticmethod
     def _format_tool_text(tool_name, state):
@@ -3049,15 +3086,20 @@ class OpenCodeIndexer:
             state = part_data.get("state") or {}
             status = str(state.get("status") or "").strip().lower() if isinstance(state, dict) else ""
             text = OpenCodeIndexer._format_tool_text(tool_name, state)
+            use_summary = _codex_summarize_tool_use(tool_name, json.dumps(state.get("input"), ensure_ascii=False) if isinstance(state, dict) else None)
             if status in ("pending", "running"):
-                return ("assistant", "tool_use", text, part_time_ms)
-            return ("tool", "tool_result", text, part_time_ms)
+                return ("assistant", "tool_use", text, part_time_ms, use_summary)
+            result_summary = _codex_summarize_tool_result(tool_name, json.dumps(state, ensure_ascii=False))
+            for key in ("name", "category", "headline", "file_path", "change_kind", "lines_added", "lines_removed"):
+                if use_summary.get(key) not in (None, ""):
+                    result_summary[key] = use_summary[key]
+            return ("tool", "tool_result", text, part_time_ms, result_summary)
         else:
             return None  # step-start / step-finish / patch / unknown
 
         if not text:
             return None
-        return (role, kind, text, part_time_ms)
+        return (role, kind, text, part_time_ms, None)
 
     def _load_flat_messages(self, session_id):
         """Load + flatten all parts for a session, in time order."""
@@ -3093,9 +3135,124 @@ class OpenCodeIndexer:
             flat_part = self._flatten_part(message_role, part_type, part_data, part_time_ms)
             if flat_part is None:
                 continue
-            role, kind, text, ts_ms = flat_part
-            flat.append({"ts_ms": ts_ms, "role": role, "kind": kind, "text": text})
+            role, kind, text, ts_ms, tool_summary = flat_part
+            item = {"ts_ms": ts_ms, "role": role, "kind": kind, "text": text}
+            if tool_summary:
+                item["tool_summary"] = tool_summary
+            flat.append(item)
         return flat
+
+    def _load_audit_events(self, session_id):
+        with self.lock:
+            rows = self.conn.execute(
+                """
+                SELECT p.id AS part_id, p.time_created AS part_ts_ms,
+                       p.data AS part_data, m.data AS message_data,
+                       m.time_created AS message_ts_ms
+                FROM part p
+                JOIN message m ON m.id = p.message_id
+                WHERE p.session_id = ?
+                ORDER BY m.time_created ASC, p.time_created ASC, p.id ASC
+                """,
+                (session_id,),
+            ).fetchall()
+
+        events = []
+        display_index = 0
+        known_mutation_paths = set()
+        for row in rows:
+            message_data = self._parse_data(row["message_data"]) or {}
+            role = str(message_data.get("role") or "assistant").strip().lower()
+            role = role if role in ("user", "assistant", "system", "developer", "tool") else "other"
+            part_data = self._parse_data(row["part_data"]) or {}
+            part_type = str(part_data.get("type") or "").strip()
+            ts_ms = parse_ts(row["part_ts_ms"]) or parse_ts(row["message_ts_ms"]) or 0
+            flat_part = self._flatten_part(role, part_type, part_data, ts_ms)
+            part_message_index = display_index if flat_part is not None else max(0, display_index - 1)
+
+            if part_type == "text":
+                text = str(part_data.get("text") or "")
+                if text:
+                    events.append(AuditEvent(
+                        ts_ms=ts_ms, role=role, kind="message", text=text,
+                        message_index=part_message_index,
+                    ))
+            elif part_type == "reasoning":
+                text = str(part_data.get("text") or "")
+                if text:
+                    events.append(AuditEvent(
+                        ts_ms=ts_ms, role="assistant", kind="reasoning", text=text,
+                        message_index=part_message_index,
+                    ))
+            elif part_type == "tool":
+                tool_name = str(part_data.get("tool") or "tool")
+                state = part_data.get("state") if isinstance(part_data.get("state"), dict) else {}
+                tool_input = state.get("input")
+                events.append(AuditEvent(
+                    ts_ms=ts_ms, role="tool", kind="tool_use",
+                    tool_name=tool_name, tool_args=tool_input,
+                    message_index=part_message_index,
+                ))
+                for path in self._tool_input_paths(tool_input):
+                    known_mutation_paths.add(path)
+                status = str(state.get("status") or "").strip().lower()
+                if status not in ("pending", "running"):
+                    metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
+                    exit_code = metadata.get("exit")
+                    exit_codes = [exit_code] if isinstance(exit_code, int) else []
+                    output = state.get("output")
+                    error_text = state.get("error") or metadata.get("error")
+                    result_text = str(output if output not in (None, "") else error_text or "")[:20_000]
+                    events.append(AuditEvent(
+                        ts_ms=ts_ms, role="tool", kind="tool_result",
+                        tool_result_text=result_text,
+                        tool_result_error=(status == "error" or (isinstance(exit_code, int) and exit_code != 0)),
+                        tool_result_exit_codes=exit_codes,
+                        tool_result_items=[result_text] if result_text else [],
+                        message_index=part_message_index,
+                    ))
+            elif part_type == "patch":
+                files = [str(path) for path in (part_data.get("files") or []) if str(path).strip()]
+                files = [path for path in files if path not in known_mutation_paths]
+                if files:
+                    events.append(AuditEvent(
+                        ts_ms=ts_ms, role="tool", kind="tool_use", tool_name="apply_patch",
+                        tool_args={
+                            "file_path": files[0],
+                            "edits": [{"file_path": path} for path in files[1:]],
+                        },
+                        message_index=part_message_index,
+                    ))
+                    known_mutation_paths.update(files)
+
+            if flat_part is not None:
+                display_index += 1
+        return events
+
+    def build_session_audit(self, session_id):
+        with self.lock:
+            session = self._session_lookup(session_id)
+        if not session:
+            return None
+        cache_key = (parse_ts(session["time_updated"]) or 0, AUDIT_VERSION)
+        cached = self._audit_cache.get(str(session_id))
+        if cached and cached[0] == cache_key:
+            self._audit_cache.move_to_end(str(session_id))
+            return cached[1]
+
+        payload = build_audit_from_events(
+            self._load_audit_events(session_id),
+            session_id=str(session_id),
+            source="opencode",
+            model=self._model_id(session["model"]),
+            started_at=parse_ts(session["time_created"]) or 0,
+            ended_at=parse_ts(session["time_updated"]) or 0,
+        ).to_dict()
+        self._audit_cache[str(session_id)] = (cache_key, payload)
+        self._audit_cache.move_to_end(str(session_id))
+        while len(self._audit_cache) > 256:
+            self._audit_cache.popitem(last=False)
+        return payload
 
     def _serialize_flat_message(self, flat_msg, message_index, include_full_text=False):
         text = str(flat_msg.get("text") or "")
@@ -3103,7 +3260,7 @@ class OpenCodeIndexer:
             text,
             include_full_text=include_full_text,
         )
-        return {
+        result = {
             "message_index": int(message_index),
             "ts_ms": flat_msg.get("ts_ms"),
             "role": str(flat_msg.get("role") or "assistant"),
@@ -3112,6 +3269,9 @@ class OpenCodeIndexer:
             "char_count": char_count,
             "is_truncated": bool(is_truncated),
         }
+        if flat_msg.get("tool_summary"):
+            result["tool_summary"] = dict(flat_msg["tool_summary"])
+        return result
 
     def _session_lookup(self, session_id):
         return self.conn.execute(
@@ -3167,18 +3327,35 @@ class OpenCodeIndexer:
             args.extend([like, like, like, like, like, like, like])
 
         sort_key = str(sort or "start").strip().lower()
+        needs_audit_scan = bool(file_path) or sort_key == "value"
         if sort_key in ("last", "end", "updated", "update"):
             sql += " ORDER BY s.time_updated DESC, s.time_created DESC"
         else:
             sql += " ORDER BY s.time_created DESC, s.time_updated DESC"
-        sql += " LIMIT ? OFFSET ?"
-        args.extend([clean_limit + 1, clean_offset])
+        if not needs_audit_scan:
+            sql += " LIMIT ? OFFSET ?"
+            args.extend([clean_limit + 1, clean_offset])
 
         with self.lock:
             rows = self.conn.execute(sql, args).fetchall()
 
-        items = [self._serialize_session_row(row) for row in rows[:clean_limit]]
-        has_more = len(rows) > clean_limit
+        audited_items = [
+            self._serialize_session_row(row, self.build_session_audit(row["id"]))
+            for row in rows
+        ]
+        if file_path:
+            audited_items = [item for item in audited_items if _match_files_touched(item.get("files_touched"), file_path)]
+        if sort_key == "value":
+            audited_items.sort(
+                key=lambda item: (int(item.get("value_score") or 0), int(item.get("start_ts_ms") or 0)),
+                reverse=True,
+            )
+        if needs_audit_scan:
+            page_items = audited_items[clean_offset:clean_offset + clean_limit + 1]
+        else:
+            page_items = audited_items
+        items = page_items[:clean_limit]
+        has_more = len(page_items) > clean_limit
         next_offset = clean_offset + len(items) if has_more else None
         return {
             "items": items,
@@ -3230,7 +3407,7 @@ class OpenCodeIndexer:
             session = self._session_lookup(session_id)
             if not session:
                 return None
-            payload = self._serialize_session_row(session)
+            payload = self._serialize_session_row(session, self.build_session_audit(session_id))
             payload["message_total"] = self._session_message_count(session_id)
             return payload
 
@@ -3763,10 +3940,13 @@ class Handler(SimpleHTTPRequestHandler):
         getter = getattr(backend.indexer, "get_stored_ai_audit", None)
         if getter:
             ai_audit = getter(session_id)
+        metadata_getter = getattr(backend.indexer, "get_session_metadata", None)
+        metadata = metadata_getter(session_id) if metadata_getter else None
         return self.send_json({
             "audit": audit,
             "ai_audit": ai_audit,
             "ai_configured": self._audit_llm_configured(),
+            "handoff": build_handoff_bundle(audit, metadata=metadata, ai_audit=ai_audit),
         })
 
     def handle_audit_generate(self, session_id, data, backend):

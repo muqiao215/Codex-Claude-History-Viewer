@@ -49,6 +49,8 @@ const scrollBottomBtn = document.getElementById("scrollBottomBtn");
 const auditPanelEl = document.getElementById("auditPanel");
 const auditActionsEl = document.getElementById("auditActions");
 const auditToggleEl = document.getElementById("auditToggle");
+const handoffDetailEl = document.getElementById("handoffDetail");
+const copyHandoffBtn = document.getElementById("copyHandoff");
 const auditGenerateBtn = document.getElementById("auditGenerate");
 const auditDeleteBtn = document.getElementById("auditDelete");
 const toolActionsEl = document.getElementById("toolActions");
@@ -120,6 +122,7 @@ let currentAudit = null;
 let auditFetchSeq = 0;
 let auditCollapsed = false;
 let currentAiAudit = null;
+let currentHandoff = null;
 let auditGenerateInFlight = false;
 let currentFilePathFilter = "";
 let toolsCollapsedByDefault = true;
@@ -2271,6 +2274,7 @@ function resetSessionPane() {
   }
   currentAudit = null;
   currentAiAudit = null;
+  currentHandoff = null;
   auditFetchSeq += 1;
   if (auditGenerateBtn) auditGenerateBtn.hidden = true;
   if (auditDeleteBtn) auditDeleteBtn.hidden = true;
@@ -2488,12 +2492,14 @@ async function fetchAuditPanel(sessionId) {
     if (seq !== auditFetchSeq) return;
     currentAudit = data.audit || null;
     currentAiAudit = data.ai_audit || null;
+    currentHandoff = data.handoff || null;
     renderAuditPanel(currentAudit);
     if (auditActionsEl) auditActionsEl.style.display = currentAudit ? "flex" : "none";
     updateAiAuditButtons();
   } catch (err) {
     if (seq !== auditFetchSeq) return;
     currentAudit = null;
+    currentHandoff = null;
     auditPanelEl.innerHTML = `<div class="audit-error">Audit load failed: ${escapeHtml(err?.message || String(err))}</div>`;
     if (auditActionsEl) auditActionsEl.style.display = "none";
   }
@@ -2600,6 +2606,20 @@ async function deleteAiAudit(sessionId) {
   } catch (err) {
     alert(`Delete failed: ${err?.message || String(err)}`);
   }
+}
+
+async function copyCurrentHandoff() {
+  if (!currentHandoff) return false;
+  const detail = handoffDetailEl?.value === "compact" ? "compact" : "standard";
+  const text = currentHandoff[detail] || currentHandoff.standard || currentHandoff.compact || "";
+  if (!text) return false;
+  await copyText(text);
+  if (copyHandoffBtn) {
+    const previous = copyHandoffBtn.textContent;
+    copyHandoffBtn.textContent = "✓ Copied";
+    setTimeout(() => { copyHandoffBtn.textContent = previous; }, 1200);
+  }
+  return true;
 }
 
 function findEvidenceById(evidenceId) {
@@ -3247,6 +3267,12 @@ if (auditGenerateBtn) {
     if (currentSession?.id) generateAiAudit(currentSession.id);
   });
 }
+
+if (copyHandoffBtn) {
+  copyHandoffBtn.addEventListener("click", () => {
+    copyCurrentHandoff();
+  });
+}
 if (auditDeleteBtn) {
   auditDeleteBtn.addEventListener("click", () => {
     if (currentSession?.id) deleteAiAudit(currentSession.id);
@@ -3726,6 +3752,11 @@ if (globalThis.__CCHV_TEST__) {
     setCurrentFilePathFilter(value) { currentFilePathFilter = String(value || ""); },
     getCurrentFilePathFilter() { return currentFilePathFilter; },
     getAuditPanelElement() { return auditPanelEl; },
+    copyCurrentHandoff,
+    setCurrentHandoff(value) { currentHandoff = value; },
+    getCurrentHandoff() { return currentHandoff; },
+    getHandoffDetailElement() { return handoffDetailEl; },
+    getCopyHandoffButton() { return copyHandoffBtn; },
     renderToolSummaryHtml,
     renderToolStatusHtml,
     isToolMessage,

@@ -107,6 +107,8 @@ def _codex_events(obj: Dict[str, Any], line_no: int) -> Iterator[AuditEvent]:
     if payload_type == "message":
         role = str(payload.get("role") or "unknown")
         text = _extract_text(payload.get("content"))
+        if _normalise_role(role) == "user" and _is_codex_context_message(text):
+            role = "system"
         yield AuditEvent(
             ts_ms=ts_ms,
             role=_normalise_role(role),
@@ -131,6 +133,20 @@ def _codex_events(obj: Dict[str, Any], line_no: int) -> Iterator[AuditEvent]:
         if name == "update_plan":
             return
         args = _coerce_args(payload.get("arguments") if payload_type == "function_call" else payload.get("input"))
+        if payload_type == "custom_tool_call" and name == "exec" and isinstance(args, str):
+            nested = _extract_exec_nested_calls(args)
+            if nested:
+                for nested_name, nested_args in nested:
+                    yield AuditEvent(
+                        ts_ms=ts_ms,
+                        role="tool",
+                        kind="tool_use",
+                        tool_name=nested_name,
+                        tool_args=nested_args,
+                        text="",
+                        line_no=line_no,
+                    )
+                return
         yield AuditEvent(
             ts_ms=ts_ms,
             role="tool",
@@ -144,12 +160,18 @@ def _codex_events(obj: Dict[str, Any], line_no: int) -> Iterator[AuditEvent]:
     if payload_type in ("function_call_output", "custom_tool_call_output"):
         raw_output = payload.get("output")
         text, is_error = _format_tool_output(raw_output)
+        exit_codes = _extract_exit_codes(raw_output)
+        result_items = _extract_result_items(raw_output)
+        if exit_codes:
+            is_error = any(code != 0 for code in exit_codes)
         yield AuditEvent(
             ts_ms=ts_ms,
             role="tool",
             kind="tool_result",
             tool_result_text=text,
             tool_result_error=is_error,
+            tool_result_exit_codes=exit_codes,
+            tool_result_items=result_items,
             line_no=line_no,
         )
         return
@@ -322,6 +344,166 @@ def _extract_text(content: Any) -> str:
                 parts.append(item)
         return "\n".join(parts)
     return ""
+
+
+_CODEX_CONTEXT_PREFIXES = (
+    "<environment_context>",
+    "<permissions instructions>",
+    "<collaboration_mode>",
+    "<skills_instructions>",
+)
+
+
+def _is_codex_context_message(text: str) -> bool:
+    stripped = str(text or "").lstrip().lower()
+    return any(stripped.startswith(prefix) for prefix in _CODEX_CONTEXT_PREFIXES)
+
+
+_JS_STRING = r'"(?:\\.|[^"\\])*"'
+
+
+def _decode_js_string(raw: str) -> Optional[str]:
+    try:
+        value = json.loads(raw)
+    except Exception:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _find_balanced_call(text: str, open_index: int) -> Optional[int]:
+    depth = 0
+    quote = ""
+    escaped = False
+    for idx in range(open_index, len(text)):
+        char = text[idx]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in ('"', "'", "`"):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return idx
+    return None
+
+
+def _extract_js_object_string(obj_text: str, key: str) -> Optional[str]:
+    match = re.search(rf'(?:["\']?{re.escape(key)}["\']?)\s*:\s*({_JS_STRING})', obj_text)
+    return _decode_js_string(match.group(1)) if match else None
+
+
+def _extract_patch_paths(patch: str) -> List[str]:
+    paths: List[str] = []
+    for match in re.finditer(r"^\*\*\* (?:Update|Add|Delete) File:\s*(.+?)\s*$", patch, re.MULTILINE):
+        path = match.group(1).strip()
+        if path and path not in paths:
+            paths.append(path)
+    return paths
+
+
+def _extract_exec_nested_calls(script: str) -> List[Tuple[str, Any]]:
+    variables: Dict[str, str] = {}
+    for match in re.finditer(rf'\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*({_JS_STRING})\s*;', script):
+        decoded = _decode_js_string(match.group(2))
+        if decoded is not None:
+            variables[match.group(1)] = decoded
+
+    calls: List[Tuple[str, Any]] = []
+    for match in re.finditer(r"\btools\.([A-Za-z_$][\w$]*)\s*\(", script):
+        name = match.group(1)
+        if name in ("update_plan", "get_goal", "update_goal"):
+            continue
+        open_index = match.end() - 1
+        close_index = _find_balanced_call(script, open_index)
+        if close_index is None:
+            continue
+        raw_arg = script[open_index + 1:close_index].strip()
+        if name == "exec_command":
+            cmd = _extract_js_object_string(raw_arg, "cmd")
+            if cmd:
+                args: Dict[str, Any] = {"command": cmd}
+                workdir = _extract_js_object_string(raw_arg, "workdir")
+                if workdir:
+                    args["workdir"] = workdir
+                calls.append(("shell_command", args))
+        elif name == "apply_patch":
+            patch = variables.get(raw_arg)
+            if patch is None and re.fullmatch(_JS_STRING, raw_arg):
+                patch = _decode_js_string(raw_arg)
+            if patch:
+                paths = _extract_patch_paths(patch)
+                args = {"patch": patch}
+                if paths:
+                    args["file_path"] = paths[0]
+                    args["edits"] = [{"file_path": path} for path in paths[1:]]
+                calls.append(("apply_patch", args))
+        else:
+            calls.append((name, _coerce_args(raw_arg)))
+    return calls
+
+
+def _extract_exit_codes(raw: Any) -> List[int]:
+    codes: List[int] = []
+    texts: List[str] = []
+    if isinstance(raw, dict):
+        code = raw.get("exit_code")
+        if isinstance(code, int):
+            codes.append(code)
+        text = raw.get("text") or raw.get("output")
+        if isinstance(text, str):
+            texts.append(text)
+    elif isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                code = item.get("exit_code")
+                if isinstance(code, int):
+                    codes.append(code)
+                if isinstance(item.get("text"), str):
+                    texts.append(item["text"])
+    elif isinstance(raw, str):
+        texts.append(raw)
+
+    decoder = json.JSONDecoder()
+    for text in texts:
+        index = 0
+        while index < len(text):
+            start = text.find("{", index)
+            if start < 0:
+                break
+            try:
+                value, end = decoder.raw_decode(text, start)
+            except json.JSONDecodeError:
+                index = start + 1
+                continue
+            if isinstance(value, dict) and isinstance(value.get("exit_code"), int):
+                codes.append(value["exit_code"])
+            index = end
+    if codes:
+        return codes
+    joined = "\n".join(texts)
+    return [int(value) for value in re.findall(r"\bExit code:\s*(-?\d+)", joined, re.IGNORECASE)]
+
+
+def _extract_result_items(raw: Any) -> List[str]:
+    if not isinstance(raw, list):
+        return []
+    items: List[str] = []
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(item.get("text"), str):
+            continue
+        text = item["text"].strip()
+        if not text or text.startswith("Script completed\nWall time"):
+            continue
+        items.append(text)
+    return items
 
 
 def _join_reasoning(summary: Any) -> str:
@@ -606,6 +788,28 @@ def extract_session_audit(
     )
 
 
+def build_audit_from_events(
+    events: Iterable[AuditEvent],
+    *,
+    session_id: str,
+    source: str,
+    model: str = "",
+    started_at: int = 0,
+    ended_at: int = 0,
+    parse_errors: int = 0,
+) -> AuditPayload:
+    """Build an audit from an already-structured source such as OpenCode DB."""
+    return _build_payload(
+        events=list(events),
+        session_id=str(session_id),
+        source=str(source),
+        model=str(model or ""),
+        started_at=int(started_at or 0),
+        ended_at=int(ended_at or 0),
+        parse_errors=int(parse_errors or 0),
+    )
+
+
 def _detect_session_id(obj: Dict[str, Any], source: str) -> Optional[str]:
     if source == "codex":
         if obj.get("type") == "session_meta":
@@ -655,9 +859,13 @@ def _build_payload(
     first_user = ""
     last_user = ""
     last_assistant = ""
+    last_assistant_before_last_user = ""
+    has_assistant_after_last_user = False
     message_count: Dict[str, int] = {"user": 0, "assistant": 0, "tool": 0, "other": 0}
     tools_used: Dict[str, int] = {}
     important_prompts: List[str] = []
+    command_runs: List[Dict[str, Any]] = []
+    pending_commands: List[Dict[str, Any]] = []
 
     # per-file mutation tracking
     file_stats: Dict[str, Dict[str, Any]] = {}
@@ -684,6 +892,7 @@ def _build_payload(
     failed_bash_count = 0
 
     for idx, ev in enumerate(events):
+        evidence_index = ev.message_index if isinstance(ev.message_index, int) else idx
         message_count[ev.role] = message_count.get(ev.role, 0) + 1
 
         # Interrupt detection works on any text-bearing event.
@@ -695,35 +904,49 @@ def _build_payload(
         if ev.kind == "message":
             text = ev.text or ""
             if ev.role == "user":
-                if not first_user:
-                    first_user = text[:MAX_PROMPT_CHARS]
-                last_user = text[:MAX_PROMPT_CHARS]
-                # collect short pivots / new asks as "important"
                 stripped = text.strip()
-                if stripped and stripped not in (first_user, last_user) and len(important_prompts) < MAX_IMPORTANT_PROMPTS:
-                    if len(stripped) < MAX_PROMPT_CHARS and (stripped.endswith("?") or stripped.lower().startswith(("now ", "next", "actually", "instead", "please", "can you", "let's"))):
-                        important_prompts.append(stripped[:MAX_PROMPT_CHARS])
+                last_assistant_before_last_user = last_assistant
+                has_assistant_after_last_user = False
+                if not first_user:
+                    first_user = stripped[:MAX_PROMPT_CHARS]
+                elif stripped and stripped != last_user and stripped != first_user and len(important_prompts) < MAX_IMPORTANT_PROMPTS:
+                    important_prompts.append(stripped[:MAX_PROMPT_CHARS])
+                last_user = stripped[:MAX_PROMPT_CHARS]
+                if stripped and tool_evidence_count < MAX_EVIDENCE_PER_TYPE:
+                    evidence.append(
+                        Evidence(
+                            id=make_evidence_id(session_id, "message", evidence_index),
+                            session_id=session_id,
+                            type="user_prompt",
+                            summary=_truncate(stripped, 180),
+                            confidence="high",
+                            message_index=evidence_index,
+                            raw_ref={"line_no": ev.line_no},
+                        ).to_dict()
+                    )
             elif ev.role == "assistant":
                 last_assistant = text[:MAX_ASSISTANT_REPLY_CHARS]
+                has_assistant_after_last_user = True
             continue
 
         if ev.kind == "tool_use":
             tool_name = str(ev.tool_name or "tool")
             key = tool_name.lower()
             tools_used[key] = tools_used.get(key, 0) + 1
+            tool_evidence_id = make_evidence_id(session_id, "tool", tool_name, evidence_index)
 
             # evidence for the tool call
             if tool_evidence_count < MAX_EVIDENCE_PER_TYPE:
                 summary = _summarise_tool_use(tool_name, ev.tool_args)
                 evidence.append(
                     Evidence(
-                        id=make_evidence_id(session_id, "tool", tool_name, idx),
+                        id=tool_evidence_id,
                         session_id=session_id,
                         type="tool_call",
                         summary=summary,
                         confidence="high",
                         tool_name=tool_name,
-                        message_index=idx,
+                        message_index=evidence_index,
                         raw_ref={"line_no": ev.line_no},
                     ).to_dict()
                 )
@@ -747,8 +970,15 @@ def _build_payload(
                 command = _extract_command_from_args(ev.tool_args) or ""
                 if command:
                     all_commands.append(command)
+                    pending_commands.append({
+                        "command": command,
+                        "status": "unknown",
+                        "exit_code": None,
+                        "evidence_id": tool_evidence_id,
+                        "message_index": evidence_index,
+                    })
                     intents = classify_command(command)
-                    remote_ctx.update_from_command(command, intents, idx)
+                    remote_ctx.update_from_command(command, intents, evidence_index)
                     # remote file extraction (plan 9.2)
                     if remote_ctx.active:
                         for rpath in extract_remote_file_paths(command):
@@ -765,26 +995,42 @@ def _build_payload(
             if len(recent_results) > 8:
                 recent_results.pop(0)
             last_tool_success = not is_error
+            if pending_commands:
+                codes = list(ev.tool_result_exit_codes or [])
+                result_items = list(ev.tool_result_items or [])
+                one_to_one = len(result_items) == len(pending_commands)
+                for command_idx, run in enumerate(pending_commands):
+                    item_text = result_items[command_idx] if one_to_one else text
+                    item_codes = _extract_exit_codes(item_text) if one_to_one else []
+                    code = item_codes[0] if item_codes else (codes[command_idx] if command_idx < len(codes) else None)
+                    item_error = code != 0 if code is not None else (_looks_like_error(item_text) if one_to_one else is_error)
+                    run["exit_code"] = code
+                    run["status"] = "pass" if code == 0 else "fail" if item_error else "unknown"
+                    run["result_summary"] = _truncate(item_text, MAX_ERROR_SAMPLE_CHARS * 2)
+                    run["result_shared"] = not one_to_one
+                    command_runs.append(run)
+                    if run["status"] == "fail":
+                        failed_bash_count += 1
+                    elif run["status"] == "pass":
+                        successful_bash_count += 1
+                pending_commands = []
             if is_error:
                 payload_errors = payload.errors
                 payload_errors["count"] = int(payload_errors.get("count", 0)) + 1
                 if len(payload_errors["samples"]) < MAX_ERROR_SAMPLES:
                     payload_errors["samples"].append(_truncate(text, MAX_ERROR_SAMPLE_CHARS))
-                failed_bash_count += 1
                 if len(error_evidence) < MAX_EVIDENCE_PER_TYPE:
                     error_evidence.append(
                         Evidence(
-                            id=make_evidence_id(session_id, "error", "tool", idx),
+                            id=make_evidence_id(session_id, "error", "tool", evidence_index),
                             session_id=session_id,
                             type="error",
                             summary=_truncate(text, MAX_ERROR_SAMPLE_CHARS),
                             confidence="high",
-                            message_index=idx,
+                            message_index=evidence_index,
                             raw_ref={"line_no": ev.line_no},
                         )
                     )
-            else:
-                successful_bash_count += 1
             # inferred file paths from build/test output (plan 9.3)
             for inferred in _extract_inferred_paths(text):
                 if inferred not in inferred_files:
@@ -891,11 +1137,14 @@ def _build_payload(
     payload.last_user_prompt = last_user
     payload.important_user_prompts = important_prompts
     payload.last_assistant_reply = last_assistant
+    payload.last_assistant_before_last_user = last_assistant_before_last_user
+    payload.has_assistant_after_last_user = has_assistant_after_last_user
     payload.message_count = message_count
     payload.tools_used = tools_used
     payload.files_touched = {"local": local_files, "remote": remote_files, "inferred": inferred_entries}
     payload.file_mutation_stats = {k: dict(v) for k, v in file_stats.items()}
     payload.command_intents = command_intents
+    payload.commands = command_runs + pending_commands
     payload.remote_context = {
         "has_remote": bool(remote_ctx.targets) or remote_ctx.remote_command_count > 0,
         "targets": sorted(t for t in remote_ctx.targets if t),
@@ -1015,6 +1264,7 @@ def _summarise_tool_use(tool_name: str, args: Any) -> str:
 
 # Public re-exports for callers that want granular helpers.
 __all__ = [
+    "build_audit_from_events",
     "extract_session_audit",
     "make_evidence_id",
 ]

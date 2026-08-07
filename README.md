@@ -7,6 +7,7 @@ Local-first, dependency-free web viewer for **Codex CLI**, **Claude Code**, **Op
 - Filter messages by role, and search within a session (highlight + next/prev)
 - Sort sidebar by **start time**, **last activity**, or **value signal**
 - Audit badges per session: files touched, tool count, remote/test/deploy/debug activity, friction, outcome, value score
+- Copy compact or standard agent handoffs with intent, constraints, changes, verification, remaining work, and evidence references
 - Highlight interruptions and common error outputs
 
 > Not affiliated with OpenAI or Anthropic. “Codex” and “Claude” are trademarks of their respective owners.
@@ -70,6 +71,13 @@ Show all options:
 ```bash
 python3 app.py --help
 ```
+
+## Documentation
+
+- [Project context](PROJECT.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Decisions](docs/DECISIONS.md)
+- [Active work](plans/)
 
 ## Demo data (included)
 
@@ -169,6 +177,10 @@ That writes:
 - Your local transcripts may contain sensitive info (API keys, file paths, proprietary code).
 - If you bind `--host 0.0.0.0`, anyone on your network may be able to access the UI. Prefer `127.0.0.1`.
 - Index files are local SQLite databases; this repo’s `.gitignore` excludes them.
+
+## Status
+
+`v1.0.0` is the first stable release. The project is actively maintained; Agent history formats remain external contracts and may require parser updates as their producers evolve.
 
 ## License
 

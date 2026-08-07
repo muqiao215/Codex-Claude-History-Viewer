@@ -328,6 +328,18 @@ async function testUpdateButtonsHighValueNoWarning() {
   assert.doesNotMatch(api.getAuditGenerateBtn().title, /low/i, "title clean when value >= 20");
 }
 
+async function testCopyHandoffUsesSelectedDetail() {
+  const { api } = await loadApp();
+  let copied = "";
+  navigator.clipboard.writeText = async (value) => { copied = value; };
+  api.setCurrentHandoff({ compact: "compact handoff", standard: "standard handoff" });
+  api.getHandoffDetailElement().value = "compact";
+  const ok = await api.copyCurrentHandoff();
+  assert.equal(ok, true);
+  assert.equal(copied, "compact handoff");
+  assert.equal(api.getCopyHandoffButton().textContent, "✓ Copied");
+}
+
 // --- Runner ---
 
 const tests = [
@@ -348,6 +360,7 @@ const tests = [
   testUpdateButtonsWithAiAuditShowsDelete,
   testUpdateButtonsLowValueWarns,
   testUpdateButtonsHighValueNoWarning,
+  testCopyHandoffUsesSelectedDetail,
 ];
 
 (async () => {
