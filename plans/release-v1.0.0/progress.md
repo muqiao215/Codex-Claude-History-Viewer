@@ -17,6 +17,7 @@
 - 用合成 Codex/Claude 数据启动服务，验证 UI、sources API、sessions API 和 handoff audit API
 - 精确提交发布内容，排除无关 `controlmesh` 文件
 - 推送 `main` 并创建 GitHub Release `v1.0.0`
+- GitHub API 拒绝了短 SHA target，记录后改用 `main` 分支成功解决
 
 ## Remaining
 

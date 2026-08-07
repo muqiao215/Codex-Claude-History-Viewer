@@ -49,3 +49,4 @@ GitHub `main` 包含已审查且通过验证的当前功能，`v1.0.0` Release �
 | Error | Attempt | Resolution |
 |---|---:|---|
 | None | 0 | — |
+| GitHub Release API 拒绝使用短提交哈希 `70ee0bb` 的 `--target`，返回 HTTP 422 | 1 | 改用远程分支 `main` 作为 target commitish |
