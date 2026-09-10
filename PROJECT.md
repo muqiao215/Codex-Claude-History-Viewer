@@ -7,6 +7,7 @@ Codex CLI, Claude Code, OpenClaw, OpenCode, and Hermes leave useful local sessio
 ## User Intent
 
 - Find past Agent sessions, commands, patches, decisions, and discussions quickly.
+- Resume a selected native provider session directly when available; native conversation context and verified SpecMesh project files are complementary layers. TaskHub adoption is not a prerequisite for native continuation.
 - See the practical value of a session: what changed, what was tested, where it failed, and whether the request converged.
 - Continue work from compact, evidence-backed handoff context instead of replaying an entire transcript.
 - Keep private development history on the user's machine by default.
@@ -34,18 +35,35 @@ A user can locate and inspect a relevant session quickly, understand its intent,
 
 ## Current State
 
-The `v1.0.0` release supports five sources, search and filtering, session/project browsing, compact tool timelines, deterministic value auditing, evidence navigation, optional heuristic or LLM audit, platform-aware launchers, and compact or standard evidence-backed Agent handoffs. OpenCode audit and handoff data are derived from its database without mutating it; Hermes remains browse-only with neutral audit signals.
+The stable `v1.0.0` release supports five sources, search and filtering, session/project browsing, compact tool timelines, deterministic value auditing, evidence navigation, optional heuristic or LLM audit, platform-aware launchers, and compact or standard evidence-backed Agent handoffs. OpenCode audit and handoff data are derived from its database without mutating it; Hermes remains browse-only with neutral audit signals.
+
+The v1.1.0-rc.1 candidate adds usage accounting, bounded daily briefings, plan previews,
+keyboard access and native OpenCode resume commands. Automated/browser checks have
+previously passed; independent-user trial M3 is still pending. Candidate publication
+does not establish stable product acceptance. CM v0.42.2 separately owns supervised
+adoption; Viewer never writes TaskHub state or source history databases.
 
 The main structural limitation is that the Python backend remains concentrated in `app.py`; source parsing, indexing, routing, and server bootstrap share one large module.
 
 ## Current Priority
 
-Collect real-world feedback on the first stable release while preserving local-first privacy and evidence traceability. Prioritize source-format compatibility and correctness before expanding process or infrastructure.
+Focus on correctness closure and first-use validation through
+[History Viewer product validation](plans/history-viewer-product-validation/task_plan.md).
+Independently re-review the seven insight-upgrade fixes, verify the real browser path from
+search to evidence-backed handoff, then obtain a first-time user's trial and prepare a
+reviewable release candidate. Passing automated tests alone does not establish product
+acceptance. Keep SpecMesh lightweight; defer new sources, parallel rewrites, and additional
+platform features until this usage loop is validated.
 
 ## Knowledge Map
 
+- Release alignment → [plans/release-alignment/](plans/release-alignment/)
+- Current product validation → [plans/history-viewer-product-validation/](plans/history-viewer-product-validation/)
+
 - How the system works → [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - Why durable choices were made → [docs/DECISIONS.md](docs/DECISIONS.md)
-- Current SpecMesh adoption work → [plans/specmesh-adoption/](plans/specmesh-adoption/)
+- Completed SpecMesh adoption → [plans/specmesh-adoption/](plans/specmesh-adoption/)
 - First stable release record → [plans/release-v1.0.0/](plans/release-v1.0.0/)
 - Feature delivery history → [docs/session-plans/](docs/session-plans/)
+
+- Plan status index → [plans/README.md](plans/README.md)

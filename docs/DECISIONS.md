@@ -89,3 +89,64 @@ Copying full transcripts or requiring an LLM to summarize every handoff.
 Revisit when:
 
 A new source lacks enough deterministic structure to produce a useful capsule.
+
+## 2026-09-06 — Treat token_count telemetry as data, not transcript
+
+Decision:
+
+Fold cumulative `event_msg/token_count` payloads into per-session `tokens_*` columns during indexing and stop surfacing them as raw JSON messages; parse Claude's per-message `usage` the same way. Store usage denormalized on `sessions` so listing, briefing, and aggregation never re-parse transcripts.
+
+Why:
+
+Usage was already on disk but invisible, and the previous fallback flooded transcripts with one raw JSON block per token-count event (thousands per session).
+
+Rejected:
+
+Currency cost estimates (prices change; tokens are the honest unit) and a separate usage table (no query needs message-level granularity yet).
+
+Revisit when:
+
+A source exposes model-level pricing or per-turn cost data worth showing next to token counts.
+
+## 2026-09-06 — Keep plan-aware scanning stateless and read-only
+
+Decision:
+
+`/plans` endpoints scan the session's working directory on request (capped: 80 files, 120 KB bodies, well-known sections only) instead of persisting plan files in the index. Briefing generation is likewise computed on demand with no storage, and its POST route is allowed for read-only sources because it writes nothing.
+
+Why:
+
+Plans change on disk constantly; a second copy in SQLite would go stale and add migration surface for near-zero query benefit. Read-only scanning respects the "upstream data is never mutated" invariant.
+
+Rejected:
+
+A `plan_files` SQLite table with mtime-sync, and indexing plan content into `search_blob` (would pollute keyword search across unrelated projects).
+
+Revisit when:
+
+Cross-project plan search or plan-history diffing becomes a real workflow.
+
+
+## 2026-09-06 — Validate the existing product before expanding scope
+
+Decision:
+
+Prioritize independent review of the insight-upgrade fixes, real browser acceptance,
+and a first-time user completing search → evidence → handoff. Keep SpecMesh as lightweight
+continuity documentation. The active plan is `plans/history-viewer-product-validation/`.
+
+Why:
+
+The user explicitly focused this next plan on History Viewer. The existing feature set
+already supports a useful independent product; correctness and successful first use are
+the next evidence needed. Green unit tests do not establish either on their own.
+
+Rejected:
+
+Parallel rewrites, new data sources, extra platform features, or expanding SpecMesh Map
+before validating the current workflow.
+
+Revisit when:
+
+The current workflow has passed independent acceptance and a concrete user need justifies
+an extension. Code cleanup needed to fix an observed defect remains within scope.

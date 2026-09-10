@@ -10,6 +10,7 @@ Each plan is a self-contained spec: goal, scope, milestones, acceptance criteria
 | 001 | [Agent Value Audit](./001-agent-value-audit.md) | **M1–M3 DONE** · M4–M6 pending | 2026-06-27 | `4462cfb` |
 | 002 | [Detail Panel, Tool Collapse, AI Audit](./002-detail-panel-and-ai-audit.md) | **M4, M5, M6 DONE** · all milestones | 2026-06-30 | `90e5f09` · M5 `03e6ba0` · M6 `c602340` |
 | 003 | [Agent Handoff Context Capsule](./003-agent-handoff.md) | **DONE** | 2026-08-08 | `v1.0.0` |
+| 004 | [Usage Dashboard, Daily Briefing, Handoff Rendering, Plan-Aware History](./004-usage-briefing-plans.md) | **DONE** | 2026-09-06 | pending (working tree) |
 
 ## Status Legend
 
@@ -73,6 +74,36 @@ M6 of plan 002 shipped on 2026-06-30:
 - Frontend: `_auditSectionAi(ai)` renders source badge (heuristic muted / llm accent), user_intent, checklist (items with ✓◐○✕ status icons + clickable evidence chips with `data-evidence-id`), deliverables list, gaps list (danger tint), next_action box. Generate/Delete buttons toggle visibility based on `currentAiAudit` state; Generate title warns when `value_score < 20`.
 - CSS `.ai-audit-section`, `.ai-source-badge`, `.ai-checklist-item`, `.ai-status-{done,partial,skipped,failed}`, `.ai-evidence-chip`, `.ai-gaps`, `.ai-next-action` reuse existing theme CSS vars.
 - 41 new backend tests in `tests/test_ai_audit.py` (heuristic shape, intent fallbacks/truncation, checklist cap/evidence, validate schema, parse LLM JSON variants, cost guard, storage round-trip, corrupt JSON); 17 new frontend tests in `tests/test_audit_ai_panel.js` (source badges, status icons, evidence chips, deliverables/gaps omission, button visibility, low-value warning). Full suite: 135/135 python green; all JS suites pass.
+
+### Phase 3 — Insight Surfaces (delivered)
+
+Plan 004 shipped on 2026-09-06 (working tree; pin hash at commit time):
+
+- **Usage**: codex `token_count` / claude `message.usage` extraction into new
+  `sessions.tokens_*` columns (parser v5/v4 forces a one-time re-index);
+  `GET /usage` aggregates totals / by-day / by-project / top sessions;
+  **⚡ Usage** panel with range selector and clickable top sessions.
+- **Briefing**: `audit/briefing.py` merges near-duplicate sessions (file-set
+  Jaccard ≥ 0.5) and renders overview / highlights / blocked / deliverables
+  from deterministic summaries + stored AI audits; `GET/POST /briefing`;
+  heuristic narrative by default, LLM narrative when a provider is
+  configured; **📰 Briefing** panel with date picker and Copy MD.
+- **Handoff rendering**: markdown preview (`👁 Preview`), `plain` / `card` /
+  `feishu` themes, rich-text clipboard copy, `.md` / `.html` download.
+- **Plan-aware history**: read-only scan of `task_plan.md` / `progress.md` /
+  `findings.md` (+ `docs/session-plans/*.md`) near a session's cwd with
+  well-known-section excerpts; `/plans` and `/session/{id}/plans` endpoints;
+  **🗒 Plans** panel. Stateless, capped, never writes.
+- `DESIGN.md` added as the visual-system contract for agent-driven UI work.
+- 53 new tests (`test_usage.py`, `test_briefing.py`, `test_plan_aware.py`,
+  `test_insight_panels.js`). Full suite: 182 python green, 5/5 JS suites.
+- Post-review hardening (same day): Claude usage is deduplicated by
+  `message.id` (parser v5 — the naive sum inflated a real sample 3.1×);
+  briefing aggregates every session in range and merges duplicates only for
+  the highlights (blocked sessions and unique files survive); plan scans use
+  a bounded read and capped enumeration; switching sessions refreshes a
+  visible handoff preview and the Plans panel; switching briefing dates
+  clears or drops stale narratives.
 
 ## Conventions
 

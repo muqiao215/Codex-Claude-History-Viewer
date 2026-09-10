@@ -58,6 +58,30 @@ const expandAllToolsBtn = document.getElementById("expandAllTools");
 const collapseAllToolsBtn = document.getElementById("collapseAllTools");
 const toolTimelineEl = document.getElementById("toolTimeline");
 const codeThemeButtons = document.querySelectorAll("[data-code-theme]");
+const insightActionsEl = document.getElementById("insightActions");
+const usageToggleBtn = document.getElementById("usageToggle");
+const usageRangeEl = document.getElementById("usageRange");
+const usageSummaryEl = document.getElementById("usageSummary");
+const usagePanelEl = document.getElementById("usagePanel");
+const usageContentEl = document.getElementById("usageContent");
+const briefingToggleBtn = document.getElementById("briefingToggle");
+const briefingPanelEl = document.getElementById("briefingPanel");
+const briefingDateEl = document.getElementById("briefingDate");
+const briefingRefreshBtn = document.getElementById("briefingRefresh");
+const briefingNarrativeBtn = document.getElementById("briefingNarrative");
+const briefingNarrativeBoxEl = document.getElementById("briefingNarrativeBox");
+const briefingContentEl = document.getElementById("briefingContent");
+const copyBriefingMdBtn = document.getElementById("copyBriefingMd");
+const planToggleBtn = document.getElementById("planToggle");
+const planPanelEl = document.getElementById("planPanel");
+const planContentEl = document.getElementById("planContent");
+const handoffPanelEl = document.getElementById("handoffPanel");
+const handoffPreviewBtn = document.getElementById("handoffPreviewBtn");
+const handoffPreviewBodyEl = document.getElementById("handoffPreviewBody");
+const handoffThemeEl = document.getElementById("handoffTheme");
+const copyHandoffRichBtn = document.getElementById("copyHandoffRich");
+const downloadHandoffMdBtn = document.getElementById("downloadHandoffMd");
+const downloadHandoffHtmlBtn = document.getElementById("downloadHandoffHtml");
 
 let currentSession = null;
 let currentMessages = [];
@@ -129,6 +153,22 @@ let toolsCollapsedByDefault = true;
 let expandedToolIndexes = new Set();
 let collapsedToolIndexes = new Set();
 let fullToolOutputIndexes = new Set();
+let currentUsage = null;
+let usageFetchSeq = 0;
+let usageLoading = false;
+let currentBriefing = null;
+let currentBriefingMarkdown = "";
+let briefingFetchSeq = 0;
+let briefingLoading = false;
+let briefingNarrativeLoading = false;
+let briefingNarrativeSeq = 0;
+let currentNarrative = null; // { date } — the briefing date the visible narrative was generated for
+let currentPlanItems = null;
+let planFetchSeq = 0;
+let handoffPreviewVisible = false;
+let usagePanelOpen = false;
+let briefingPanelOpen = false;
+let planPanelOpen = false;
 
 if (scrollBottomBtn) {
   const updateScrollBottomBtn = () => {
@@ -241,6 +281,7 @@ const UI_STORAGE_KEYS = {
   sessionSort: "historyViewer.ui.sessionSort",
   system: "historyViewer.ui.system",
   source: "historyViewer.ui.source",
+  handoffTheme: "historyViewer.ui.handoffTheme",
 };
 
 const LAYOUT_STORAGE_KEYS = {
@@ -439,6 +480,11 @@ function normalizeSource(source, system = currentSystem) {
 
 function buildResumeInvocation(system, source, sessionId) {
   if (!sessionId || sessionId === "-") return "";
+  if (source === "opencode") {
+    // Native OpenCode sessions remain owned by OpenCode, not the viewer.
+    if (!/^ses_[A-Za-z0-9]+$/.test(sessionId)) return "";
+    return `opencode --session ${sessionId}`;
+  }
   if (source === "codex") return `codex resume ${sessionId}`;
   if (source === "claude") return `claude -r ${sessionId} --dangerously-skip-permissions`;
   return "";
@@ -1515,6 +1561,8 @@ function renderSessions(sessions) {
   const appendSessionItem = (session) => {
     const item = document.createElement("div");
     item.className = "session-item";
+    item.setAttribute("role", "button");
+    item.setAttribute("tabindex", "0");
     if (session.pinned) item.classList.add("pinned");
     if (currentSession?.id && currentSession.id === session.id) item.classList.add("active");
     item.dataset.sessionId = session.id;
@@ -1557,6 +1605,8 @@ function renderProjects(projects) {
   projects.forEach((project) => {
     const item = document.createElement("div");
     item.className = "session-item";
+    item.setAttribute("role", "button");
+    item.setAttribute("tabindex", "0");
     item.dataset.project = project.project;
     item.innerHTML = `
       <div class="session-title">${escapeHtml(project.project || "Project")}</div>
@@ -2278,6 +2328,34 @@ function resetSessionPane() {
   auditFetchSeq += 1;
   if (auditGenerateBtn) auditGenerateBtn.hidden = true;
   if (auditDeleteBtn) auditDeleteBtn.hidden = true;
+  if (insightActionsEl) insightActionsEl.style.display = "none";
+  currentUsage = null;
+  usageFetchSeq += 1;
+  usagePanelOpen = false;
+  if (usagePanelEl) usagePanelEl.hidden = true;
+  if (usageToggleBtn) usageToggleBtn.classList.remove("active");
+  currentBriefing = null;
+  currentBriefingMarkdown = "";
+  briefingFetchSeq += 1;
+  briefingNarrativeSeq += 1;
+  currentNarrative = null;
+  briefingNarrativeLoading = false;
+  briefingPanelOpen = false;
+  if (briefingPanelEl) briefingPanelEl.hidden = true;
+  if (briefingNarrativeBoxEl) { briefingNarrativeBoxEl.hidden = true; briefingNarrativeBoxEl.innerHTML = ""; }
+  if (briefingToggleBtn) briefingToggleBtn.classList.remove("active");
+  currentPlanItems = null;
+  planFetchSeq += 1;
+  planPanelOpen = false;
+  if (planPanelEl) planPanelEl.hidden = true;
+  if (planToggleBtn) planToggleBtn.classList.remove("active");
+  handoffPreviewVisible = false;
+  if (handoffPanelEl) handoffPanelEl.hidden = true;
+  if (handoffPreviewBtn) {
+    handoffPreviewBtn.classList.remove("active");
+    handoffPreviewBtn.setAttribute("aria-expanded", "false");
+  }
+  if (handoffPreviewBodyEl) handoffPreviewBodyEl.innerHTML = "";
   updateMatchNavState("");
 }
 
@@ -2312,6 +2390,7 @@ function renderSessionHeader(session) {
   resumeCmdWslEl.textContent = resumeCommands.wsl;
 
   if (sessionActionsEl) sessionActionsEl.style.display = sourceIsReadOnly() ? "none" : "flex";
+  if (insightActionsEl) insightActionsEl.style.display = "flex";
   if (pinSessionBtn) {
     pinSessionBtn.textContent = session.pinned ? "📌 Unpin" : "📌 Pin";
     pinSessionBtn.disabled = pinSessionInFlight || sourceIsReadOnly();
@@ -2483,7 +2562,9 @@ async function fetchAuditPanel(sessionId) {
     if (seq !== auditFetchSeq) return;
     if (res.status === 404) {
       currentAudit = null;
+      currentHandoff = null;
       renderAuditPanel(null);
+      if (handoffPreviewVisible) renderHandoffPreview();
       if (auditActionsEl) auditActionsEl.style.display = "none";
       return;
     }
@@ -2494,6 +2575,7 @@ async function fetchAuditPanel(sessionId) {
     currentAiAudit = data.ai_audit || null;
     currentHandoff = data.handoff || null;
     renderAuditPanel(currentAudit);
+    if (handoffPreviewVisible) renderHandoffPreview();
     if (auditActionsEl) auditActionsEl.style.display = currentAudit ? "flex" : "none";
     updateAiAuditButtons();
   } catch (err) {
@@ -2501,6 +2583,7 @@ async function fetchAuditPanel(sessionId) {
     currentAudit = null;
     currentHandoff = null;
     auditPanelEl.innerHTML = `<div class="audit-error">Audit load failed: ${escapeHtml(err?.message || String(err))}</div>`;
+    if (handoffPreviewVisible) renderHandoffPreview();
     if (auditActionsEl) auditActionsEl.style.display = "none";
   }
 }
@@ -2620,6 +2703,498 @@ async function copyCurrentHandoff() {
     setTimeout(() => { copyHandoffBtn.textContent = previous; }, 1200);
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Insight panels (session-plans 004): usage, briefing, plans, handoff preview.
+// Pure builders return HTML strings so they can be unit-tested without a DOM.
+// ---------------------------------------------------------------------------
+
+function fmtInt(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toLocaleString() : "0";
+}
+
+function buildUsageHtml(data) {
+  const totals = data?.totals || {};
+  if (!data?.has_usage_data) {
+    return `<div class="insight-empty muted">No token usage recorded for this source in the selected range. Sessions re-index with usage on the next start (parser v5/v4).</div>`;
+  }
+  const chips = [
+    ["Sessions", totals.session_count],
+    ["Input", totals.input],
+    ["Output", totals.output],
+    ["Cached", totals.cached],
+    ["Reasoning", totals.reasoning],
+    ["Total", totals.total],
+  ].map(([label, value]) => `<span class="usage-chip"><span class="usage-chip-value">${fmtInt(value)}</span><span class="usage-chip-label">${label}</span></span>`).join("");
+
+  const maxDay = Math.max(1, ...(data.by_day || []).map((row) => Number(row.total) || 0));
+  const dayRows = (data.by_day || []).map((row) => {
+    const pct = Math.round(((Number(row.total) || 0) / maxDay) * 100);
+    return `<div class="usage-row" title="${fmtInt(row.total)} tokens across ${fmtInt(row.session_count)} session(s)">
+      <span class="usage-row-label">${escapeHtml(row.day || "?")}</span>
+      <span class="usage-bar"><span class="usage-bar-fill" style="width:${pct}%"></span></span>
+      <span class="usage-row-value">${fmtInt(row.total)}</span>
+    </div>`;
+  }).join("");
+
+  const maxProject = Math.max(1, ...(data.by_project || []).map((row) => Number(row.total) || 0));
+  const projectRows = (data.by_project || []).map((row) => {
+    const pct = Math.round(((Number(row.total) || 0) / maxProject) * 100);
+    const project = row.project || "(unknown)";
+    return `<div class="usage-row" title="${fmtInt(row.total)} tokens across ${fmtInt(row.session_count)} session(s)">
+      <span class="usage-row-label usage-row-project" title="${escapeHtml(project)}">${escapeHtml(project)}</span>
+      <span class="usage-bar"><span class="usage-bar-fill" style="width:${pct}%"></span></span>
+      <span class="usage-row-value">${fmtInt(row.total)}</span>
+    </div>`;
+  }).join("");
+
+  const topRows = (data.top_sessions || []).map((row) => {
+    const title = row.title || row.id || "(untitled)";
+    const when = formatTime(row.start_ts_ms);
+    return `<div class="usage-top-row" data-usage-session="${escapeHtml(row.id || "")}" role="button" tabindex="0" title="Open this session">
+      <span class="usage-top-title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
+      <span class="usage-top-meta muted">${escapeHtml(when)} · ${fmtInt(row.tokens_total)} tokens</span>
+    </div>`;
+  }).join("");
+
+  return `
+    <div class="usage-totals">${chips}</div>
+    <div class="usage-section"><div class="label">By day</div>${dayRows || '<div class="muted">No data.</div>'}</div>
+    <div class="usage-section"><div class="label">By project</div>${projectRows || '<div class="muted">No data.</div>'}</div>
+    <div class="usage-section"><div class="label">Top sessions</div>${topRows || '<div class="muted">No sessions.</div>'}</div>
+  `;
+}
+
+function renderUsagePanel(data) {
+  currentUsage = data || null;
+  if (usageSummaryEl) {
+    usageSummaryEl.textContent = currentUsage?.has_usage_data
+      ? `${fmtInt(currentUsage.totals?.total)} tokens in ${fmtInt(currentUsage.totals?.session_count)} sessions`
+      : "";
+  }
+  if (usageContentEl) {
+    usageContentEl.innerHTML = buildUsageHtml(currentUsage || {});
+  }
+}
+
+async function fetchUsagePanel() {
+  if (!usageContentEl) return;
+  const seq = (usageFetchSeq += 1);
+  const days = Number(usageRangeEl?.value ?? 30);
+  const params = new URLSearchParams();
+  if (days > 0) {
+    const startMs = Date.now() - days * 86_400_000;
+    params.set("start", new Date(startMs).toISOString().slice(0, 10));
+  }
+  usageLoading = true;
+  usageContentEl.innerHTML = `<div class="insight-empty muted">Loading usage…</div>`;
+  try {
+    const res = await fetch(`${apiBase()}/usage?${params.toString()}`);
+    if (seq !== usageFetchSeq) return;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderUsagePanel(await res.json());
+  } catch (err) {
+    if (seq !== usageFetchSeq) return;
+    usageContentEl.innerHTML = `<div class="insight-empty muted">Usage load failed: ${escapeHtml(err?.message || String(err))}</div>`;
+  } finally {
+    usageLoading = false;
+  }
+}
+
+function toggleUsagePanel() {
+  if (!usagePanelEl) return;
+  // State-driven (not derived from the hidden attribute) so the toggle works
+  // regardless of the panel's initial DOM state.
+  usagePanelOpen = !usagePanelOpen;
+  usagePanelEl.hidden = !usagePanelOpen;
+  if (usageToggleBtn) {
+    usageToggleBtn.classList.toggle("active", usagePanelOpen);
+    usageToggleBtn.setAttribute("aria-expanded", usagePanelOpen ? "true" : "false");
+  }
+  if (usagePanelOpen && !currentUsage && !usageLoading) fetchUsagePanel();
+}
+
+function buildBriefingHtml(briefing) {
+  const overview = briefing?.overview || {};
+  if (!overview.session_count) {
+    return `<div class="insight-empty muted">No sessions recorded on ${escapeHtml(briefing?.date || "this date")} for this source.</div>`;
+  }
+  const truncatedNote = briefing?.truncated
+    ? `<div class="briefing-truncated-note" role="status">⚠️ This day exceeds the ${fmtInt(briefing.session_limit || 0)}-session safety cap — totals cover the newest ${fmtInt(overview.session_count)} indexed sessions only and are partial.</div>`
+    : "";
+  const chips = [
+    ["Sessions", overview.session_count],
+    ["Projects", overview.project_count],
+    ["Merged", overview.merged_count],
+    ["Friction", overview.friction_total],
+  ].concat(overview.tokens_total ? [["Tokens", overview.tokens_total]] : [])
+    .map(([label, value]) => `<span class="usage-chip"><span class="usage-chip-value">${fmtInt(value)}</span><span class="usage-chip-label">${label}</span></span>`)
+    .join("");
+
+  const outcomes = Object.entries(overview.outcomes || {})
+    .map(([key, count]) => `<span class="audit-badge badge-outcome outcome-${escapeHtml(key)}">${escapeHtml(key)} ${fmtInt(count)}</span>`)
+    .join("");
+
+  const highlights = (briefing.highlights || []).map((item) => `
+    <div class="briefing-item" data-usage-session="${escapeHtml(item.session_id || "")}" role="button" tabindex="0">
+      <div class="briefing-item-head">
+        <span class="briefing-item-title">${escapeHtml(item.title || "(untitled)")}</span>
+        <span class="audit-badge badge-value">◆ ${fmtInt(item.value_score)}</span>
+      </div>
+      <div class="briefing-item-meta muted">${escapeHtml(item.project || "")}${item.tokens_total ? ` · ${fmtInt(item.tokens_total)} tokens` : ""}${item.merged_count ? ` · +${fmtInt(item.merged_count)} merged` : ""}</div>
+      ${item.goal ? `<div class="briefing-item-goal">${escapeHtml(item.goal)}</div>` : ""}
+      ${item.next_action ? `<div class="briefing-item-next">→ ${escapeHtml(item.next_action)}</div>` : ""}
+    </div>`).join("");
+
+  const blocked = (briefing.blocked || []).map((item) => `
+    <div class="briefing-item briefing-blocked" data-usage-session="${escapeHtml(item.session_id || "")}" role="button" tabindex="0">
+      <div class="briefing-item-head">
+        <span class="briefing-item-title">${escapeHtml(item.title || "(untitled)")}</span>
+        <span class="audit-badge badge-friction">⚠ ${fmtInt(item.friction_score)}</span>
+      </div>
+      <div class="briefing-item-meta muted">${escapeHtml(item.project || "")} · ${escapeHtml(item.outcome_signal || "")}</div>
+      ${item.error_sample ? `<div class="briefing-item-error">${escapeHtml(item.error_sample)}</div>` : ""}
+    </div>`).join("");
+
+  const deliverables = (briefing.deliverables || []).map((item) => {
+    const ops = [];
+    if (item.write_count) ops.push(`w${item.write_count}`);
+    if (item.edit_count) ops.push(`e${item.edit_count}`);
+    return `<div class="audit-row audit-file-row" data-file-path="${escapeHtml(item.path)}"><span class="audit-file-path" title="${escapeHtml(item.path)}">${escapeHtml(item.path)}</span><span class="audit-file-counts">${ops.join("")}</span></div>`;
+  }).join("");
+
+  return `
+    ${truncatedNote}
+    <div class="usage-totals">${chips}</div>
+    ${outcomes ? `<div class="briefing-outcomes">${outcomes}</div>` : ""}
+    <div class="usage-section"><div class="label">Highlights</div>${highlights || '<div class="muted">Nothing notable.</div>'}</div>
+    <div class="usage-section"><div class="label">Blocked</div>${blocked || '<div class="muted">Nothing blocked.</div>'}</div>
+    <div class="usage-section"><div class="label">Deliverables</div>${deliverables || '<div class="muted">No file changes.</div>'}</div>
+  `;
+}
+
+function renderBriefingPanel() {
+  if (briefingContentEl) {
+    briefingContentEl.innerHTML = buildBriefingHtml(currentBriefing || {});
+  }
+}
+
+async function fetchBriefingPanel() {
+  if (!briefingContentEl) return;
+  const seq = (briefingFetchSeq += 1);
+  const params = new URLSearchParams();
+  const date = normalizeDateInput(briefingDateEl?.value);
+  if (date) params.set("date", date);
+  briefingLoading = true;
+  briefingContentEl.innerHTML = `<div class="insight-empty muted">Loading briefing…</div>`;
+  try {
+    const res = await fetch(`${apiBase()}/briefing?${params.toString()}`);
+    if (seq !== briefingFetchSeq) return;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (seq !== briefingFetchSeq) return;
+    currentBriefing = data.briefing || null;
+    currentBriefingMarkdown = data.markdown || "";
+    // A narrative is only valid for the briefing date it was generated for;
+    // drop it as soon as the visible briefing moves to another day.
+    if (currentNarrative && currentBriefing && currentNarrative.date !== currentBriefing.date) {
+      currentNarrative = null;
+      if (briefingNarrativeBoxEl) {
+        briefingNarrativeBoxEl.hidden = true;
+        briefingNarrativeBoxEl.innerHTML = "";
+      }
+    }
+    renderBriefingPanel();
+  } catch (err) {
+    if (seq !== briefingFetchSeq) return;
+    briefingContentEl.innerHTML = `<div class="insight-empty muted">Briefing load failed: ${escapeHtml(err?.message || String(err))}</div>`;
+  } finally {
+    briefingLoading = false;
+  }
+}
+
+function toggleBriefingPanel() {
+  if (!briefingPanelEl) return;
+  briefingPanelOpen = !briefingPanelOpen;
+  briefingPanelEl.hidden = !briefingPanelOpen;
+  if (briefingToggleBtn) {
+    briefingToggleBtn.classList.toggle("active", briefingPanelOpen);
+    briefingToggleBtn.setAttribute("aria-expanded", briefingPanelOpen ? "true" : "false");
+  }
+  if (briefingPanelOpen && !currentBriefing && !briefingLoading) {
+    if (briefingDateEl && !briefingDateEl.value) {
+      briefingDateEl.value = new Date().toISOString().slice(0, 10);
+    }
+    fetchBriefingPanel();
+  }
+}
+
+async function generateBriefingNarrative() {
+  if (briefingNarrativeLoading) return;
+  briefingNarrativeLoading = true;
+  const seq = (briefingNarrativeSeq += 1);
+  const requestedDate = normalizeDateInput(briefingDateEl?.value);
+  if (briefingNarrativeBtn) {
+    briefingNarrativeBtn.disabled = true;
+    briefingNarrativeBtn.textContent = "⏳ Generating…";
+  }
+  try {
+    const payload = {
+      mode: "auto",
+      date: requestedDate,
+    };
+    const res = await fetch(`${apiBase()}/briefing`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (seq !== briefingNarrativeSeq) return;
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || err.error || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    if (seq !== briefingNarrativeSeq) return;
+    // Slow response guard: if the user moved to another date/source while the
+    // POST was in flight, this narrative no longer matches what's on screen.
+    const briefingDate = data.briefing?.date || "";
+    const viewDate = normalizeDateInput(briefingDateEl?.value);
+    if (viewDate && briefingDate && viewDate !== briefingDate) return;
+    const narrative = data.narrative || {};
+    currentNarrative = { date: briefingDate };
+    if (briefingNarrativeBoxEl) {
+      const sourceLabel = narrative.source === "llm" ? `LLM · ${narrative.model || "model"}` : "Heuristic";
+      briefingNarrativeBoxEl.hidden = false;
+      briefingNarrativeBoxEl.innerHTML = `
+        <div class="briefing-narrative-head"><span class="ai-source-badge ai-source-${escapeHtml(narrative.source || "heuristic")}">${escapeHtml(sourceLabel)}</span></div>
+        <div class="briefing-narrative-text">${escapeHtml(narrative.narrative || "")}</div>
+        ${(narrative.suggestions || []).map((s) => `<div class="briefing-narrative-suggestion">→ ${escapeHtml(s)}</div>`).join("")}
+      `;
+    }
+  } catch (err) {
+    if (seq !== briefingNarrativeSeq) return;
+    alert(`Narrative generation failed: ${err?.message || String(err)}`);
+  } finally {
+    if (seq === briefingNarrativeSeq) {
+      briefingNarrativeLoading = false;
+      if (briefingNarrativeBtn) {
+        briefingNarrativeBtn.disabled = false;
+        briefingNarrativeBtn.textContent = "🤖 Narrative";
+      }
+    }
+  }
+}
+
+function buildPlanListHtml(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) {
+    return `<div class="insight-empty muted">No planning files (task_plan.md / progress.md / findings.md / docs/session-plans) found near this session.</div>`;
+  }
+  const rows = list.map((item) => {
+    const sections = Object.entries(item.sections || {}).map(([key, body]) =>
+      `<div class="plan-section"><span class="plan-section-key">${escapeHtml(key)}</span><span class="plan-section-body">${escapeHtml(String(body).slice(0, 400))}</span></div>`
+    ).join("");
+    return `<details class="plan-item">
+      <summary>
+        <span class="plan-name">${escapeHtml(item.name || "")}</span>
+        <span class="plan-path muted" title="${escapeHtml(item.rel_path || "")}">${escapeHtml(item.rel_path || "")}</span>
+        <span class="plan-mtime muted">${escapeHtml(formatTime(item.mtime_ms))}</span>
+      </summary>
+      ${sections || '<div class="plan-section muted">No well-known sections (Task/Plan/Status/Next step) found; file not excerpted.</div>'}
+    </details>`;
+  }).join("");
+  return `<div class="plan-list">${rows}</div>`;
+}
+
+function renderPlanPanel() {
+  if (planContentEl) {
+    planContentEl.innerHTML = buildPlanListHtml(currentPlanItems || []);
+  }
+}
+
+async function fetchPlanPanel() {
+  if (!currentSession?.id || !planContentEl) return;
+  const seq = (planFetchSeq += 1);
+  planContentEl.innerHTML = `<div class="insight-empty muted">Loading plans…</div>`;
+  try {
+    const res = await fetch(`${apiBase()}/session/${encodeURIComponent(currentSession.id)}/plans`);
+    if (seq !== planFetchSeq) return;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (seq !== planFetchSeq) return;
+    currentPlanItems = data.items || [];
+    renderPlanPanel();
+  } catch (err) {
+    if (seq !== planFetchSeq) return;
+    planContentEl.innerHTML = `<div class="insight-empty muted">Plans load failed: ${escapeHtml(err?.message || String(err))}</div>`;
+  }
+}
+
+function togglePlanPanel() {
+  if (!planPanelEl) return;
+  planPanelOpen = !planPanelOpen;
+  planPanelEl.hidden = !planPanelOpen;
+  if (planToggleBtn) {
+    planToggleBtn.classList.toggle("active", planPanelOpen);
+    planToggleBtn.setAttribute("aria-expanded", planPanelOpen ? "true" : "false");
+  }
+  if (planPanelOpen) fetchPlanPanel();
+}
+
+// Session-switch hook: visible session-scoped panels must follow the newly
+// selected session (fetchSession does not go through resetSessionPane).
+function onSessionChanged() {
+  if (planPanelOpen) fetchPlanPanel();
+}
+
+// --- Handoff preview / themes / export -------------------------------------
+
+const HANDOFF_THEME_ALIASES = { default: "plain" };
+
+function setHandoffTheme(theme, { persist } = { persist: false }) {
+  const normalized = HANDOFF_THEME_ALIASES[theme] || theme;
+  const allowed = new Set(["plain", "card", "feishu"]);
+  const next = allowed.has(normalized) ? normalized : "plain";
+  if (handoffThemeEl) handoffThemeEl.value = next;
+  if (handoffPreviewBodyEl) {
+    handoffPreviewBodyEl.classList.remove("handoff-theme-plain", "handoff-theme-card", "handoff-theme-feishu");
+    handoffPreviewBodyEl.classList.add(`handoff-theme-${next}`);
+  }
+  if (persist) {
+    try {
+      localStorage.setItem(UI_STORAGE_KEYS.handoffTheme, next);
+    } catch {
+      // ignore
+    }
+  }
+  return next;
+}
+
+function applyStoredHandoffTheme() {
+  let saved = null;
+  try {
+    saved = localStorage.getItem(UI_STORAGE_KEYS.handoffTheme);
+  } catch {
+    saved = null;
+  }
+  setHandoffTheme(saved || "plain", { persist: false });
+}
+
+function currentHandoffText() {
+  if (!currentHandoff) return "";
+  const detail = handoffDetailEl?.value === "compact" ? "compact" : "standard";
+  return currentHandoff[detail] || currentHandoff.standard || currentHandoff.compact || "";
+}
+
+function renderHandoffPreview() {
+  if (!handoffPreviewBodyEl) return;
+  const text = currentHandoffText();
+  handoffPreviewBodyEl.innerHTML = text ? renderMarkdown(text) : `<div class="insight-empty muted">No handoff available for this session.</div>`;
+}
+
+function toggleHandoffPreview() {
+  if (!handoffPanelEl) return;
+  handoffPreviewVisible = !handoffPreviewVisible;
+  handoffPanelEl.hidden = !handoffPreviewVisible;
+  if (handoffPreviewBtn) {
+    handoffPreviewBtn.classList.toggle("active", handoffPreviewVisible);
+    handoffPreviewBtn.setAttribute("aria-expanded", handoffPreviewVisible ? "true" : "false");
+  }
+  if (handoffPreviewVisible) renderHandoffPreview();
+}
+
+async function copyHandoffRich() {
+  const text = currentHandoffText();
+  if (!text) return false;
+  const html = renderMarkdown(text);
+  let copied = false;
+  try {
+    if (typeof ClipboardItem === "function" && navigator.clipboard?.write) {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([text], { type: "text/plain" }),
+        }),
+      ]);
+      copied = true;
+    }
+  } catch {
+    copied = false;
+  }
+  if (!copied) await copyText(text);
+  if (copyHandoffRichBtn) {
+    const previous = copyHandoffRichBtn.textContent;
+    copyHandoffRichBtn.textContent = "✓ Copied";
+    setTimeout(() => { copyHandoffRichBtn.textContent = previous; }, 1200);
+  }
+  return true;
+}
+
+function buildHandoffHtmlDoc(text, theme = "plain") {
+  const body = renderMarkdown(text || "");
+  const themeBody = {
+    card: `background:#ffffff;border:1px solid #dbe3ee;border-radius:12px;padding:24px 28px;margin:24px auto;max-width:860px;box-shadow:0 1px 4px rgba(15,23,42,.08);`,
+    feishu: `background:#ffffff;border:1px solid #e1eaff;border-left:4px solid #3370ff;border-radius:8px;padding:20px 24px;margin:24px auto;max-width:820px;color:#1f2329;`,
+    plain: `max-width:860px;margin:24px auto;padding:0 16px;color:#1f2937;`,
+  }[theme] || "";
+  const head = {
+    card: `h1,h2,h3{color:#1d4ed8}code{background:rgba(37,99,235,.08);padding:1px 5px;border-radius:4px}`,
+    feishu: `h1,h2,h3{color:#3370ff}blockquote{border-left:3px solid #91baff;margin:8px 0;padding:4px 12px;color:#51565d}code{background:#f2f3f5;padding:1px 5px;border-radius:4px}`,
+    plain: `h1,h2,h3{color:#111827}`,
+  }[theme] || "";
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Agent handoff</title>
+<style>
+  body{font-family:-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,"PingFang SC","Microsoft YaHei",sans-serif;font-size:14px;line-height:1.65;background:#f5f7fb;margin:0;}
+  pre{background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:10px 12px;overflow:auto;}
+  table{border-collapse:collapse}th,td{border:1px solid #d0d7de;padding:4px 8px}
+  ${head}
+</style>
+</head>
+<body>
+<div style="${themeBody}">
+${body}
+</div>
+</body>
+</html>`;
+}
+
+function downloadText(filename, content, mime) {
+  try {
+    const blob = new Blob([content], { type: mime || "text/plain" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function handoffFilename(ext) {
+  const sessionId = String(currentSession?.id || "session").slice(0, 12).replace(/[^\w.-]+/g, "-");
+  return `handoff-${sessionId}.${ext}`;
+}
+
+function downloadHandoff(format) {
+  const text = currentHandoffText();
+  if (!text) return;
+  if (format === "md") {
+    downloadText(handoffFilename("md"), text, "text/markdown");
+  } else if (format === "html") {
+    const theme = setHandoffTheme(handoffThemeEl?.value || "plain", { persist: false });
+    downloadText(handoffFilename("html"), buildHandoffHtmlDoc(text, theme), "text/html");
+  }
 }
 
 function findEvidenceById(evidenceId) {
@@ -2756,6 +3331,16 @@ function scheduleSessionSearchRender() {
     sessionSearchTimer = null;
     refreshSessionSearch();
   }, SESSION_SEARCH_DEBOUNCE_MS);
+}
+
+let briefingRefreshTimer = null;
+
+function scheduleBriefingRefresh() {
+  if (briefingRefreshTimer) clearTimeout(briefingRefreshTimer);
+  briefingRefreshTimer = setTimeout(() => {
+    briefingRefreshTimer = null;
+    fetchBriefingPanel();
+  }, LIST_RELOAD_DEBOUNCE_MS);
 }
 
 async function refreshSessionSearch({ resetRenderCount = true } = {}) {
@@ -2956,6 +3541,7 @@ async function fetchSession(sessionId) {
     expandedMessageIndexes = new Set();
     renderSessionHeader(currentSession);
     fetchAuditPanel(currentSession.id);
+    onSessionChanged();
     await loadMessageWindow({
       offset: currentMessageOffset,
       limit: MESSAGE_RENDER_PAGE_SIZE,
@@ -3179,6 +3765,15 @@ sessionListEl.addEventListener("click", (event) => {
   fetchSession(sessionId);
 });
 
+sessionListEl.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const target = event.target instanceof Element ? event.target : null;
+  const item = target ? target.closest(".session-item") : null;
+  if (!item || item !== document.activeElement) return;
+  event.preventDefault();
+  item.click();
+});
+
 searchForm.addEventListener("submit", (event) => {
   event.preventDefault();
   reloadList();
@@ -3276,6 +3871,115 @@ if (copyHandoffBtn) {
 if (auditDeleteBtn) {
   auditDeleteBtn.addEventListener("click", () => {
     if (currentSession?.id) deleteAiAudit(currentSession.id);
+  });
+}
+
+if (handoffDetailEl) {
+  handoffDetailEl.addEventListener("change", () => {
+    if (handoffPreviewVisible) renderHandoffPreview();
+  });
+}
+
+if (handoffPreviewBtn) {
+  handoffPreviewBtn.addEventListener("click", () => {
+    toggleHandoffPreview();
+  });
+}
+
+if (handoffThemeEl) {
+  handoffThemeEl.addEventListener("change", () => {
+    setHandoffTheme(handoffThemeEl.value, { persist: true });
+    if (handoffPreviewVisible) renderHandoffPreview();
+  });
+}
+
+if (copyHandoffRichBtn) {
+  copyHandoffRichBtn.addEventListener("click", () => {
+    copyHandoffRich();
+  });
+}
+
+if (downloadHandoffMdBtn) {
+  downloadHandoffMdBtn.addEventListener("click", () => {
+    downloadHandoff("md");
+  });
+}
+
+if (downloadHandoffHtmlBtn) {
+  downloadHandoffHtmlBtn.addEventListener("click", () => {
+    downloadHandoff("html");
+  });
+}
+
+if (usageToggleBtn) {
+  usageToggleBtn.addEventListener("click", () => {
+    toggleUsagePanel();
+  });
+}
+
+if (usageRangeEl) {
+  usageRangeEl.addEventListener("change", () => {
+    fetchUsagePanel();
+  });
+}
+
+if (usageContentEl) {
+  usageContentEl.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const row = target ? target.closest("[data-usage-session]") : null;
+    if (!row) return;
+    const sessionId = row.dataset.usageSession;
+    if (sessionId) fetchSession(sessionId);
+  });
+}
+
+if (briefingToggleBtn) {
+  briefingToggleBtn.addEventListener("click", () => {
+    toggleBriefingPanel();
+  });
+}
+
+if (briefingRefreshBtn) {
+  briefingRefreshBtn.addEventListener("click", () => {
+    fetchBriefingPanel();
+  });
+}
+
+if (briefingDateEl) {
+  briefingDateEl.addEventListener("input", () => {
+    scheduleBriefingRefresh();
+  });
+}
+
+if (briefingNarrativeBtn) {
+  briefingNarrativeBtn.addEventListener("click", () => {
+    generateBriefingNarrative();
+  });
+}
+
+if (copyBriefingMdBtn) {
+  copyBriefingMdBtn.addEventListener("click", async () => {
+    if (!currentBriefingMarkdown) return;
+    await copyText(currentBriefingMarkdown);
+    const previous = copyBriefingMdBtn.textContent;
+    copyBriefingMdBtn.textContent = "✓ Copied";
+    setTimeout(() => { copyBriefingMdBtn.textContent = previous; }, 1200);
+  });
+}
+
+if (briefingContentEl) {
+  briefingContentEl.addEventListener("click", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const row = target ? target.closest("[data-usage-session]") : null;
+    if (!row) return;
+    const sessionId = row.dataset.usageSession;
+    if (sessionId) fetchSession(sessionId);
+  });
+}
+
+if (planToggleBtn) {
+  planToggleBtn.addEventListener("click", () => {
+    togglePlanPanel();
   });
 }
 
@@ -3500,6 +4204,7 @@ codeThemeButtons.forEach((btn) => {
 });
 applyStoredCodeTheme();
 applyStoredSessionSort();
+applyStoredHandoffTheme();
 
 if (sessionSortEl) {
   sessionSortEl.addEventListener("change", () => {
@@ -3788,5 +4493,48 @@ if (globalThis.__CCHV_TEST__) {
     getCurrentAiAudit() { return currentAiAudit; },
     getAuditGenerateBtn() { return auditGenerateBtn; },
     getAuditDeleteBtn() { return auditDeleteBtn; },
+    buildUsageHtml,
+    renderUsagePanel,
+    getCurrentUsage() { return currentUsage; },
+    fetchUsagePanel,
+    toggleUsagePanel,
+    getUsagePanelElement() { return usagePanelEl; },
+    getUsageContentElement() { return usageContentEl; },
+    buildBriefingHtml,
+    renderBriefingPanel,
+    fetchBriefingPanel,
+    toggleBriefingPanel,
+    generateBriefingNarrative,
+    getCurrentBriefing() { return currentBriefing; },
+    getCurrentBriefingMarkdown() { return currentBriefingMarkdown; },
+    getBriefingPanelElement() { return briefingPanelEl; },
+    getBriefingContentElement() { return briefingContentEl; },
+    getBriefingNarrativeBoxElement() { return briefingNarrativeBoxEl; },
+    getCurrentNarrative() { return currentNarrative; },
+    setCurrentNarrative(value) { currentNarrative = value; },
+    getBriefingNarrativeSeq() { return briefingNarrativeSeq; },
+    onSessionChanged,
+    fetchAuditPanel,
+    buildPlanListHtml,
+    renderPlanPanel,
+    fetchPlanPanel,
+    togglePlanPanel,
+    getCurrentPlanItems() { return currentPlanItems; },
+    getPlanPanelElement() { return planPanelEl; },
+    getPlanContentElement() { return planContentEl; },
+    setHandoffTheme,
+    applyStoredHandoffTheme,
+    buildHandoffHtmlDoc,
+    renderHandoffPreview,
+    toggleHandoffPreview,
+    copyHandoffRich,
+    downloadHandoff,
+    downloadText,
+    handoffFilename,
+    getHandoffPanelElement() { return handoffPanelEl; },
+    getHandoffPreviewBodyElement() { return handoffPreviewBodyEl; },
+    getHandoffThemeElement() { return handoffThemeEl; },
+    isHandoffPreviewVisible() { return handoffPreviewVisible; },
+    setInsightActionsDisplay(value) { if (insightActionsEl) insightActionsEl.style.display = value; },
   };
 }
