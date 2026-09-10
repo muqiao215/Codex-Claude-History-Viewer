@@ -1,0 +1,22 @@
+[
+  {
+    "file": "demo/claude/projects/demo-project/session-2026-02-11-demo-claude-0001.jsonl",
+    "sha256": "fe9bb9e02199addfce14f469064970bace09f211d94021a4a16c3cd8674eb7bf"
+  },
+  {
+    "file": "demo/codex/sessions/2026/02/10/rollout-2026-02-10T09-00-00-demo-alpha-0001.jsonl",
+    "sha256": "32c27629a55d47e7207a30a331d38de00aac93f91e75c8656d0bb448a7ba697e"
+  },
+  {
+    "file": "demo/codex/sessions/2026/02/10/rollout-2026-02-10T10-00-00-demo-beta-0001.jsonl",
+    "sha256": "7420168c8c469ca2f597dce61954ca279114b4012efcb52f7ad7868f821726ac"
+  },
+  {
+    "file": "demo/codex/sessions/2026/02/11/rollout-2026-02-11T09-00-00-demo-gamma-0001.jsonl",
+    "sha256": "47e7a6880c8291122f041d74d0e4693eb43515beaeebae6a4e2f5b41ea895f3d"
+  },
+  {
+    "file": "demo/codex/sessions/2026/02/12/rollout-2026-02-12T08-00-00-demo-dense-0001.jsonl",
+    "sha256": "e0ea71d7894235cf809cda43abb0519c53eb736f5e37c6cc6f6b32b35b88afd1"
+  }
+]

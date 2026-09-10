@@ -32,6 +32,15 @@ from audit.ai_audit import (
 )
 from audit.llm_client import LLMError, call_chat_completions, detect_provider
 from audit.handoff import build_handoff_bundle
+from audit.briefing import (
+    BRIEFING_AUDIT_ENRICH_LIMIT,
+    BRIEFING_MAX_SESSIONS,
+    build_briefing,
+    build_briefing_llm_messages,
+    generate_heuristic_briefing_narrative,
+    parse_briefing_llm_response,
+    render_briefing_markdown,
+)
 from audit.schema import LLM_AUDIT_INPUT_FIELDS
 
 MAX_SEARCH_CHARS = 2_000_000
@@ -349,6 +358,143 @@ def slugify_path_label(value):
     text = re.sub(r"-{2,}", "-", text)
     text = text.strip("-.")
     return text or "project"
+
+
+# ---------------------------------------------------------------------------
+# Plan-aware history (session-plans 004 §P1-4): recognise planning artifacts
+# (planning-with-files / SpecMesh conventions) under a session's cwd. The scan
+# is stateless, strictly read-only, and capped so a huge repo cannot stall the
+# request.
+# ---------------------------------------------------------------------------
+
+PLAN_FILE_NAMES = ("task_plan.md", "progress.md", "findings.md")
+PLAN_SCAN_MAX_FILES = 80
+PLAN_FILE_MAX_CHARS = 120_000
+PLAN_SECTION_PREVIEW_CHARS = 700
+_PLAN_SECTION_KEYS = ("task", "goal", "plan", "status", "next step", "next action")
+
+
+def extract_plan_sections(text):
+    """Pull short excerpts of the well-known planning sections from a plan file.
+
+    Returns ``{section_key: excerpt}`` for ``## `` headings whose title matches
+    ``_PLAN_SECTION_KEYS`` (case-insensitive). Unknown sections are ignored so
+    a long plan file cannot bloat the API payload.
+    """
+    sections = {}
+    current_key = None
+    current_lines = []
+
+    def _flush():
+        nonlocal current_key, current_lines
+        if current_key and current_lines:
+            body = "\n".join(current_lines).strip()
+            if body:
+                if len(body) > PLAN_SECTION_PREVIEW_CHARS:
+                    body = body[: PLAN_SECTION_PREVIEW_CHARS - 1].rstrip() + "…"
+                sections.setdefault(current_key, body)
+        current_key = None
+        current_lines = []
+
+    for line in str(text or "").splitlines():
+        heading = re.match(r"^#{1,3}\s+(.+?)\s*$", line)
+        if heading:
+            _flush()
+            title = " ".join(heading.group(1).split()).lower()
+            if title in _PLAN_SECTION_KEYS:
+                current_key = title.replace(" ", "_")
+            continue
+        if current_key:
+            current_lines.append(line)
+    _flush()
+    return sections
+
+
+def scan_plan_files(cwd):
+    """Collect planning artifacts under ``cwd`` (read-only).
+
+    Recognises ``task_plan.md`` / ``progress.md`` / ``findings.md`` at the
+    project root and under ``plans/*``, plus ``docs/session-plans/*.md``.
+    Returns entries sorted by mtime descending; each carries short section
+    excerpts instead of the full file body.
+    """
+    root = Path(str(cwd or "")).expanduser()
+    # NOTE: Path("") silently resolves to the process CWD; reject empty input
+    # so a blank project string never scans an unintended directory.
+    if not str(cwd or "").strip() or not root.is_dir():
+        return []
+
+    candidates = []
+    seen = set()
+
+    def _add(path):
+        try:
+            resolved = str(path.resolve())
+        except OSError:
+            return
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        candidates.append(path)
+
+    for name in PLAN_FILE_NAMES:
+        _add(root / name)
+    plans_dir = root / "plans"
+    if plans_dir.is_dir():
+        try:
+            # Bound enumeration itself (not just the returned slice) so a
+            # directory full of plan folders cannot make the request do
+            # unbounded work.
+            children = sorted(p for p in plans_dir.iterdir() if p.is_dir())[:PLAN_SCAN_MAX_FILES]
+        except OSError:
+            children = []
+        for child in children:
+            for name in PLAN_FILE_NAMES:
+                _add(child / name)
+    session_plans_dir = root / "docs" / "session-plans"
+    if session_plans_dir.is_dir():
+        try:
+            for child in sorted(session_plans_dir.glob("*.md"))[:PLAN_SCAN_MAX_FILES]:
+                _add(child)
+        except OSError:
+            pass
+
+    items = []
+    for path in candidates:
+        if len(items) >= PLAN_SCAN_MAX_FILES:
+            break
+        try:
+            if not path.is_file():
+                continue
+            stat = path.stat()
+            # Bounded read: never pull the whole file into memory just to
+            # truncate it afterwards.
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                text = handle.read(PLAN_FILE_MAX_CHARS)
+        except OSError:
+            continue
+        try:
+            rel_path = str(path.relative_to(root))
+        except ValueError:
+            rel_path = str(path)
+        items.append({
+            "name": path.name,
+            "rel_path": rel_path,
+            "mtime_ms": int(stat.st_mtime * 1000),
+            "size": int(stat.st_size),
+            "sections": extract_plan_sections(text[:PLAN_FILE_MAX_CHARS]),
+        })
+    items.sort(key=lambda item: item["mtime_ms"], reverse=True)
+    return items
+
+
+def filter_plan_files_for_window(items, start_ms=None, end_ms=None, margin_ms=7 * 86_400_000):
+    """Keep plan files whose mtime falls near a session's activity window."""
+    if start_ms is None or end_ms is None:
+        return list(items or [])
+    low = int(start_ms) - int(margin_ms)
+    high = int(end_ms) + int(margin_ms)
+    return [item for item in (items or []) if low <= int(item["mtime_ms"]) <= high]
 
 
 def extract_text(content_items):
@@ -802,6 +948,35 @@ def _claude_summarize_tool_result(tool_result_item, tool_use_result=None):
     return s
 
 
+def _codex_usage_from_token_count(info):
+    # ALGO: `total_token_usage` is cumulative across the session; keep the
+    # largest total seen so mid-session zeros / retries never lower it.
+    if not isinstance(info, dict):
+        return None
+    usage = info.get("total_token_usage")
+    if not isinstance(usage, dict):
+        return None
+
+    def _int(key):
+        value = usage.get(key)
+        return int(value) if isinstance(value, (int, float)) else 0
+
+    total = _int("total_tokens")
+    return {
+        "input": _int("input_tokens"),
+        "output": _int("output_tokens"),
+        "cached": _int("cached_input_tokens"),
+        "reasoning": _int("reasoning_output_tokens"),
+        "total": total,
+    }
+
+
+def _usage_greater(candidate, current):
+    if not isinstance(candidate, dict):
+        return False
+    return candidate.get("total", 0) > (current or {}).get("total", 0)
+
+
 def parse_codex_session_file(path: Path):
     session_id = None
     start_ts_ms = None
@@ -813,6 +988,7 @@ def parse_codex_session_file(path: Path):
     search_parts = []
     search_len = 0
     tool_names = {}
+    usage_totals = None
 
     def add_search(text):
         nonlocal search_len
@@ -943,7 +1119,14 @@ def parse_codex_session_file(path: Path):
                         add_raw_message(messages, ts_ms, "other", obj, reason=f"response_item:{payload_type or 'unknown'}")
                 elif obj_type == "event_msg":
                     payload = obj.get("payload", {})
-                    if payload.get("type") == "agent_reasoning":
+                    payload_type = payload.get("type")
+                    if payload_type == "token_count":
+                        # Telemetry, not transcript: aggregate usage and skip
+                        # so token_count events don't flood the raw feed.
+                        candidate = _codex_usage_from_token_count(payload.get("info"))
+                        if _usage_greater(candidate, usage_totals):
+                            usage_totals = candidate
+                    elif payload_type == "agent_reasoning":
                         text = payload.get("text", "")
                         if isinstance(text, str) and text:
                             messages.append({
@@ -983,6 +1166,7 @@ def parse_codex_session_file(path: Path):
         "message_count": message_count,
         "messages": messages,
         "search_blob": search_blob,
+        "usage": usage_totals,
     }
 
 
@@ -1128,6 +1312,66 @@ def _claude_format_tool_result(tool_result_item, tool_use_result=None):
     return "\n".join(lines).strip()
 
 
+def _claude_usage_from_message(msg):
+    # ALGO: Claude Code reports per-message usage on assistant records; the
+    # session total is the sum over *unique* messages. Cache reads/creation
+    # are reported separately from billed input tokens.
+    if not isinstance(msg, dict):
+        return None
+    usage = msg.get("usage")
+    if not isinstance(usage, dict):
+        return None
+
+    def _int(key):
+        value = usage.get(key)
+        return int(value) if isinstance(value, (int, float)) else 0
+
+    return {
+        "input": _int("input_tokens"),
+        "output": _int("output_tokens"),
+        "cached": _int("cache_creation_input_tokens") + _int("cache_read_input_tokens"),
+        "reasoning": 0,
+        "total": _int("input_tokens") + _int("output_tokens")
+        + _int("cache_creation_input_tokens") + _int("cache_read_input_tokens"),
+    }
+
+
+_EMPTY_USAGE = {"input": 0, "output": 0, "cached": 0, "reasoning": 0, "total": 0}
+
+
+def _accumulate_claude_usage(usage_by_id, usage_unkeyed, msg):
+    """Fold one assistant record's usage into the dedup accumulators.
+
+    Claude Code splits one assistant message (same ``message.id``) across
+    several JSONL records — text / tool_use blocks each re-carry the same
+    usage. Counting every record would multiply the totals, so per-id we keep
+    the variant with the largest total (records for one id report identical
+    or monotonically updated counts). Records without an id (legacy format)
+    cannot be deduped and are summed as-is.
+    """
+    candidate = _claude_usage_from_message(msg)
+    if not candidate:
+        return
+    mid = msg.get("id")
+    if isinstance(mid, str) and mid:
+        prev = usage_by_id.get(mid)
+        if prev is None or candidate["total"] > prev["total"]:
+            usage_by_id[mid] = candidate
+    else:
+        for key in usage_unkeyed:
+            usage_unkeyed[key] += candidate.get(key, 0)
+
+
+def _finalize_claude_usage(usage_by_id, usage_unkeyed):
+    usage_totals = dict(_EMPTY_USAGE)
+    for per in usage_by_id.values():
+        for key in usage_totals:
+            usage_totals[key] += per.get(key, 0)
+    for key in usage_totals:
+        usage_totals[key] += usage_unkeyed[key]
+    return usage_totals
+
+
 def parse_claude_session_file(path: Path):
     session_id = None
     start_ts_ms = None
@@ -1138,6 +1382,8 @@ def parse_claude_session_file(path: Path):
     messages = []
     search_parts = []
     search_len = 0
+    usage_by_id = {}
+    usage_unkeyed = dict(_EMPTY_USAGE)
 
     def add_search(text):
         nonlocal search_len
@@ -1236,6 +1482,7 @@ def parse_claude_session_file(path: Path):
                     continue
 
                 if role == "assistant":
+                    _accumulate_claude_usage(usage_by_id, usage_unkeyed, msg)
                     if isinstance(content, str):
                         add_message(ts_ms, "assistant", "message", content.strip(), count_for_stats=True)
                     elif isinstance(content, list):
@@ -1292,6 +1539,7 @@ def parse_claude_session_file(path: Path):
         "message_count": message_count,
         "messages": messages,
         "search_blob": search_blob,
+        "usage": _finalize_claude_usage(usage_by_id, usage_unkeyed),
     }
 
 
@@ -1602,6 +1850,7 @@ def parse_openclaw_session_file(path: Path):
         "message_count": message_count,
         "messages": messages,
         "search_blob": search_blob,
+        "usage": None,
     }
 
 
@@ -1698,6 +1947,11 @@ class Indexer:
                 cur.execute("ALTER TABLE messages ADD COLUMN tool_summary_json TEXT")
             except sqlite3.OperationalError:
                 pass
+            for column in ("tokens_input", "tokens_output", "tokens_cached", "tokens_reasoning", "tokens_total"):
+                try:
+                    cur.execute(f"ALTER TABLE sessions ADD COLUMN {column} INTEGER DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass
             self.conn.commit()
 
     def maybe_update_index(self, max_age_seconds=None):
@@ -1770,11 +2024,18 @@ class Indexer:
 
                 self.conn.execute("DELETE FROM messages WHERE session_id = ?", (session["id"],))
                 pinned = int(row["pinned"] or 0) if row else 0
+                usage = session.get("usage") or {}
+
+                def _usage_int(key):
+                    value = usage.get(key)
+                    return int(value) if isinstance(value, (int, float)) else 0
+
                 self.conn.execute(
                     """
                     INSERT OR REPLACE INTO sessions
-                    (id, file_path, start_ts_ms, end_ts_ms, cwd, title, message_count, mtime, search_blob, parser_version, pinned)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (id, file_path, start_ts_ms, end_ts_ms, cwd, title, message_count, mtime, search_blob, parser_version, pinned,
+                     tokens_input, tokens_output, tokens_cached, tokens_reasoning, tokens_total)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         session["id"],
@@ -1788,6 +2049,11 @@ class Indexer:
                         session["search_blob"],
                         self.parser_version,
                         pinned,
+                        _usage_int("input"),
+                        _usage_int("output"),
+                        _usage_int("cached"),
+                        _usage_int("reasoning"),
+                        _usage_int("total"),
                     ),
                 )
 
@@ -1896,7 +2162,7 @@ class Indexer:
         sql = (
             "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned, "
             "files_touched_json, tool_summary_json, command_intents_json, remote_context_json, "
-            "outcome_signal, value_score, friction_score, action_density "
+            "outcome_signal, value_score, friction_score, action_density, tokens_total "
             "FROM sessions WHERE 1=1"
         )
         args = []
@@ -1965,7 +2231,7 @@ class Indexer:
         select_sql = (
             "SELECT id, start_ts_ms, end_ts_ms, title, message_count, cwd, pinned, "
             "files_touched_json, tool_summary_json, command_intents_json, remote_context_json, "
-            "outcome_signal, value_score, friction_score, action_density FROM sessions"
+            "outcome_signal, value_score, friction_score, action_density, tokens_total FROM sessions"
         )
         pinned_rows = []
         with self.lock:
@@ -2043,6 +2309,61 @@ class Indexer:
             "offset": clean_offset,
             "has_more": has_more,
             "next_offset": next_offset,
+        }
+
+    def query_usage(self, start_ms=None, end_ms=None, cwd=None):
+        # Aggregated token usage for the Usage panel. Day buckets use the
+        # viewer's local timezone to match the sidebar date dividers.
+        where_sql = " WHERE 1=1"
+        args = []
+        if start_ms is not None:
+            where_sql += " AND start_ts_ms >= ?"
+            args.append(int(start_ms))
+        if end_ms is not None:
+            where_sql += " AND start_ts_ms <= ?"
+            args.append(int(end_ms))
+        if cwd:
+            where_sql += " AND cwd = ?"
+            args.append(cwd)
+
+        def _sum_columns():
+            return (
+                "COUNT(*) AS session_count, "
+                "COALESCE(SUM(tokens_input), 0) AS input, "
+                "COALESCE(SUM(tokens_output), 0) AS output, "
+                "COALESCE(SUM(tokens_cached), 0) AS cached, "
+                "COALESCE(SUM(tokens_reasoning), 0) AS reasoning, "
+                "COALESCE(SUM(tokens_total), 0) AS total"
+            )
+
+        def _fetch(sql, extra_args=None):
+            with self.lock:
+                rows = self.conn.execute(sql, [*args, *(extra_args or [])]).fetchall()
+            return [dict(row) for row in rows]
+
+        totals_rows = _fetch(f"SELECT {_sum_columns()} FROM sessions{where_sql}")
+        totals = totals_rows[0] if totals_rows else {}
+        by_day = _fetch(
+            "SELECT date(start_ts_ms / 1000, 'unixepoch', 'localtime') AS day, "
+            f"{_sum_columns()} FROM sessions{where_sql} "
+            "GROUP BY day ORDER BY day DESC LIMIT 60"
+        )
+        by_project = _fetch(
+            "SELECT COALESCE(NULLIF(cwd, ''), '(unknown)') AS project, "
+            f"{_sum_columns()} FROM sessions{where_sql} "
+            "GROUP BY project ORDER BY total DESC LIMIT 12"
+        )
+        top_sessions = _fetch(
+            "SELECT id, title, cwd, start_ts_ms, tokens_input, tokens_output, "
+            "tokens_cached, tokens_reasoning, tokens_total "
+            f"FROM sessions{where_sql} ORDER BY tokens_total DESC LIMIT 10"
+        )
+        return {
+            "totals": totals,
+            "has_usage_data": int(totals.get("total") or 0) > 0,
+            "by_day": by_day,
+            "by_project": by_project,
+            "top_sessions": top_sessions,
         }
 
     def _serialize_message_row(self, row, message_index, include_full_text=False):
@@ -2899,6 +3220,18 @@ class HermesStateIndexer:
     def pin_session(self, session_id, pinned):
         return False
 
+    def query_usage(self, start_ms=None, end_ms=None, cwd=None):
+        # Hermes state DB exposes no per-session token columns; report zeros
+        # so the Usage panel degrades gracefully for this read-only source.
+        del start_ms, end_ms, cwd
+        return {
+            "totals": {"session_count": 0, "input": 0, "output": 0, "cached": 0, "reasoning": 0, "total": 0},
+            "has_usage_data": False,
+            "by_day": [],
+            "by_project": [],
+            "top_sessions": [],
+        }
+
 
 class OpenCodeIndexer:
     """Read-only indexer for the OpenCode local SQLite state DB.
@@ -2975,6 +3308,7 @@ class OpenCodeIndexer:
             "message_count": int(row["message_count"] or 0),
             "cwd": cwd,
             "pinned": 0,
+            "tokens_total": int(row["tokens_total"] or 0) if "tokens_total" in row.keys() else 0,
             **_neutral_audit_summary(),
         }
         if audit:
@@ -3300,6 +3634,7 @@ class OpenCodeIndexer:
         sql = (
             "SELECT s.id, s.project_id, s.directory, s.title, s.time_created, "
             "s.time_updated, s.model, s.agent, "
+            "(COALESCE(s.tokens_input, 0) + COALESCE(s.tokens_output, 0)) AS tokens_total, "
             "(SELECT COUNT(*) FROM message m WHERE m.session_id = s.id) AS message_count "
             "FROM session s WHERE 1=1"
         )
@@ -3537,6 +3872,64 @@ class OpenCodeIndexer:
     def pin_session(self, session_id, pinned):
         return False
 
+    def query_usage(self, start_ms=None, end_ms=None, cwd=None):
+        # ALGO: OpenCode tracks tokens on its own session rows (see class
+        # docstring); aggregate them directly instead of re-deriving.
+        where_sql = " WHERE 1=1"
+        args = []
+        if start_ms is not None:
+            where_sql += " AND time_created >= ?"
+            args.append(int(start_ms))
+        if end_ms is not None:
+            where_sql += " AND time_created <= ?"
+            args.append(int(end_ms))
+        if cwd:
+            where_sql += f" AND {self._project_value_no_alias()} = ?"
+            args.append(cwd)
+
+        def _sum_columns():
+            return (
+                "COUNT(*) AS session_count, "
+                "COALESCE(SUM(tokens_input), 0) AS input, "
+                "COALESCE(SUM(tokens_output), 0) AS output, "
+                "COALESCE(SUM(COALESCE(tokens_cache_read, 0) + COALESCE(tokens_cache_write, 0)), 0) AS cached, "
+                "COALESCE(SUM(tokens_reasoning), 0) AS reasoning, "
+                "COALESCE(SUM(tokens_input), 0) + COALESCE(SUM(tokens_output), 0) AS total"
+            )
+
+        def _fetch(sql, extra_args=None):
+            with self.lock:
+                rows = self.conn.execute(sql, [*args, *(extra_args or [])]).fetchall()
+            return [dict(row) for row in rows]
+
+        totals_rows = _fetch(f"SELECT {_sum_columns()} FROM session{where_sql}")
+        totals = totals_rows[0] if totals_rows else {}
+        by_day = _fetch(
+            "SELECT date(time_created / 1000, 'unixepoch', 'localtime') AS day, "
+            f"{_sum_columns()} FROM session{where_sql} "
+            "GROUP BY day ORDER BY day DESC LIMIT 60"
+        )
+        by_project = _fetch(
+            f"SELECT {self._project_value_no_alias()} AS project, "
+            f"{_sum_columns()} FROM session{where_sql} "
+            "GROUP BY project ORDER BY total DESC LIMIT 12"
+        )
+        top_sessions = _fetch(
+            "SELECT id, title, directory AS cwd, time_created AS start_ts_ms, "
+            "tokens_input, tokens_output, "
+            "COALESCE(tokens_cache_read, 0) + COALESCE(tokens_cache_write, 0) AS tokens_cached, "
+            "COALESCE(tokens_reasoning, 0) AS tokens_reasoning, "
+            "COALESCE(tokens_input, 0) + COALESCE(tokens_output, 0) AS tokens_total "
+            f"FROM session{where_sql} ORDER BY tokens_total DESC LIMIT 10"
+        )
+        return {
+            "totals": totals,
+            "has_usage_data": int(totals.get("total") or 0) > 0,
+            "by_day": by_day,
+            "by_project": by_project,
+            "top_sessions": top_sessions,
+        }
+
 
 class WslBootstrapper:
     def __init__(self, distro):
@@ -3737,6 +4130,15 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.handle_sessions(parsed, backend)
             if source_path == "/projects":
                 return self.handle_projects(parsed, backend)
+            if source_path == "/usage":
+                return self.handle_usage(parsed, backend)
+            if source_path == "/briefing":
+                return self.handle_briefing_get(parsed, backend)
+            if source_path == "/plans":
+                return self.handle_plans(parsed, backend)
+            if source_path and source_path.startswith("/session/") and source_path.endswith("/plans"):
+                session_id = self._extract_session_messages_request(source_path, "/plans")
+                return self.handle_plans(parsed, backend, session_id=session_id)
             if source_path and source_path.endswith("/messages/search"):
                 session_id = self._extract_session_messages_request(source_path, "/messages/search")
                 return self.handle_session_messages_search(session_id, parsed, backend)
@@ -3780,6 +4182,10 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "not found"}, status=404)
         if not self._ensure_backend_ready(backend):
             return
+        if source_path == "/briefing":
+            # Briefing generation reads deterministic summaries and writes
+            # nothing to the source, so it is allowed for read-only sources.
+            return self.handle_briefing_generate(data, backend)
         if getattr(backend, "read_only", False):
             return self.send_json({"error": "read_only_source"}, status=405)
 
@@ -3919,6 +4325,156 @@ class Handler(SimpleHTTPRequestHandler):
             "next_offset": page["next_offset"],
         })
 
+    def handle_usage(self, parsed, backend):
+        params = parse_qs(parsed.query)
+        start = params.get("start", [None])[0]
+        end = params.get("end", [None])[0]
+        project = params.get("project", [""])[0].strip() or None
+        start_ms = parse_date_param(start, end=False)
+        end_ms = parse_date_param(end, end=True)
+        fn = getattr(backend.indexer, "query_usage", None)
+        if fn is None:
+            return self.send_json({
+                "totals": {},
+                "has_usage_data": False,
+                "by_day": [],
+                "by_project": [],
+                "top_sessions": [],
+            })
+        return self.send_json(fn(start_ms=start_ms, end_ms=end_ms, cwd=project))
+
+    def handle_plans(self, parsed, backend, session_id=None):
+        if session_id is not None:
+            meta = backend.indexer.get_session_metadata(session_id)
+            if not meta:
+                return self.send_json({"error": "not_found"}, status=404)
+            cwd = str(meta.get("cwd") or "")
+            items = filter_plan_files_for_window(
+                scan_plan_files(cwd), meta.get("start_ts_ms"), meta.get("end_ts_ms")
+            )
+            return self.send_json({"cwd": cwd, "items": items})
+        params = parse_qs(parsed.query)
+        project = params.get("project", [""])[0].strip()
+        if not project:
+            return self.send_json({"error": "project required"}, status=400)
+        return self.send_json({"cwd": project, "items": scan_plan_files(project)})
+
+    def _build_briefing_for_range(self, backend, date_value, project):
+        if date_value:
+            start_ms = parse_date_param(date_value, end=False)
+            end_ms = parse_date_param(date_value, end=True)
+            if start_ms is None or end_ms is None:
+                return None, None, "invalid_date"
+        else:
+            date_value = datetime.now().strftime("%Y-%m-%d")
+            start_ms = parse_date_param(date_value, end=False)
+            end_ms = parse_date_param(date_value, end=True)
+        # Aggregate every session in range: page through the index instead of
+        # taking one window, otherwise the overview silently undercounts.
+        items = []
+        truncated = False
+        offset = 0
+        while True:
+            page = backend.indexer.list_sessions_page(
+                start_ms=start_ms,
+                end_ms=end_ms,
+                limit=DEFAULT_LIMIT,
+                offset=offset,
+                cwd=project,
+            )
+            items.extend(page["items"])
+            if not page["has_more"] or page["next_offset"] is None:
+                break
+            if len(items) >= BRIEFING_MAX_SESSIONS:
+                # Runaway safeguard: stop paging but never pretend the
+                # overview is complete — the flag + note must reach the UI.
+                truncated = True
+                break
+            offset = page["next_offset"]
+        audits = self._collect_briefing_audits(items, backend)
+        briefing = build_briefing(
+            items,
+            audits=audits,
+            date_label=date_value,
+            source=str(getattr(backend, "source", "") or ""),
+        )
+        markdown = render_briefing_markdown(briefing)
+        if truncated:
+            briefing["truncated"] = True
+            briefing["session_limit"] = BRIEFING_MAX_SESSIONS
+            markdown += (
+                f"\n\n> ⚠️ Note: this day has more than the {BRIEFING_MAX_SESSIONS}-session "
+                f"safety cap. Totals cover the {len(items)} newest indexed sessions only — "
+                "older sessions in the day are not included."
+            )
+        return briefing, markdown, None
+
+    def _collect_briefing_audits(self, items, backend):
+        builder = getattr(backend.indexer, "build_session_audit", None)
+        if builder is None:
+            return {}
+        ranked = sorted(
+            items,
+            key=lambda it: int(it.get("value_score") or 0),
+            reverse=True,
+        )[:BRIEFING_AUDIT_ENRICH_LIMIT]
+        getter = getattr(backend.indexer, "get_stored_ai_audit", None)
+        audits = {}
+        for item in ranked:
+            sid = str(item.get("id") or "")
+            if not sid:
+                continue
+            try:
+                audit = builder(sid)
+            except Exception:
+                audit = None
+            if audit is None:
+                continue
+            bundle = {"audit": audit}
+            if getter:
+                bundle["ai_audit"] = getter(sid) or {}
+            audits[sid] = bundle
+        return audits
+
+    def handle_briefing_get(self, parsed, backend):
+        params = parse_qs(parsed.query)
+        date_value = params.get("date", [""])[0].strip()
+        project = params.get("project", [""])[0].strip() or None
+        briefing, markdown, error = self._build_briefing_for_range(backend, date_value, project)
+        if error:
+            return self.send_json({"error": error}, status=400)
+        return self.send_json({
+            "briefing": briefing,
+            "markdown": markdown,
+            "ai_configured": self._audit_llm_configured(),
+        })
+
+    def handle_briefing_generate(self, data, backend):
+        date_value = str(data.get("date") or "").strip()
+        project = str(data.get("project") or "").strip() or None
+        briefing, markdown, error = self._build_briefing_for_range(backend, date_value, project)
+        if error:
+            return self.send_json({"error": error}, status=400)
+        mode = str(data.get("mode") or "auto").strip().lower()
+        config = self._audit_llm_config()
+        if mode == "llm" and not config:
+            return self.send_json({"error": "no_llm_configured", "detail": "Configure --audit-llm-base-url/model or set OPENAI_API_KEY."}, status=400)
+        narrative = None
+        if mode in ("llm", "auto") and config:
+            try:
+                raw = call_chat_completions(config, build_briefing_llm_messages(briefing))
+                narrative = parse_briefing_llm_response(raw, model=config.get("model"))
+            except (LLMError, ValueError) as exc:
+                if mode == "llm":
+                    return self.send_json({"error": "llm_failed", "detail": str(exc)}, status=502)
+        if narrative is None:
+            narrative = generate_heuristic_briefing_narrative(briefing)
+        return self.send_json({
+            "briefing": briefing,
+            "markdown": markdown,
+            "narrative": narrative,
+        })
+
     def handle_session(self, session_id, backend, parsed=None):
         include_messages = False
         if parsed is not None:
@@ -4052,6 +4608,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description="Codex + Claude + OpenClaw history viewer")
+    parser.add_argument("--version", action="version", version=Path(__file__).with_name("VERSION").read_text().strip())
     parser.add_argument("--codex-dir", default=os.path.expanduser("~/.codex"))
     parser.add_argument("--claude-dir", default=os.path.expanduser("~/.claude"))
     parser.add_argument("--openclaw-dir", default=os.path.expanduser("~/.openclaw"))
@@ -4152,15 +4709,15 @@ def main():
         wsl_openclaw_dir = Path(args.wsl_openclaw_dir) if args.wsl_openclaw_dir else (wsl_home / ".openclaw")
         wsl_bootstrapper = WslBootstrapper(args.wsl_distro)
 
-        register_source("windows", "codex", codex_dir, codex_dir / "sessions", "index.sqlite", parse_codex_session_file, 4)
-        register_source("windows", "claude", claude_dir, claude_dir / "projects", "index_claude.sqlite", parse_claude_session_file, 3, file_filter_fn=claude_filter)
+        register_source("windows", "codex", codex_dir, codex_dir / "sessions", "index.sqlite", parse_codex_session_file, 5)
+        register_source("windows", "claude", claude_dir, claude_dir / "projects", "index_claude.sqlite", parse_claude_session_file, 5, file_filter_fn=claude_filter)
         register_source("windows", "openclaw", openclaw_dir, openclaw_dir / "agents", "index_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter)
-        register_source("wsl", "codex", wsl_codex_dir, wsl_codex_dir / "sessions", "index_wsl_codex.sqlite", parse_codex_session_file, 4, ensure_fn=wsl_bootstrapper.ensure)
-        register_source("wsl", "claude", wsl_claude_dir, wsl_claude_dir / "projects", "index_wsl_claude.sqlite", parse_claude_session_file, 3, file_filter_fn=claude_filter, ensure_fn=wsl_bootstrapper.ensure)
+        register_source("wsl", "codex", wsl_codex_dir, wsl_codex_dir / "sessions", "index_wsl_codex.sqlite", parse_codex_session_file, 5, ensure_fn=wsl_bootstrapper.ensure)
+        register_source("wsl", "claude", wsl_claude_dir, wsl_claude_dir / "projects", "index_wsl_claude.sqlite", parse_claude_session_file, 5, file_filter_fn=claude_filter, ensure_fn=wsl_bootstrapper.ensure)
         register_source("wsl", "openclaw", wsl_openclaw_dir, wsl_openclaw_dir / "agents", "index_wsl_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter, ensure_fn=wsl_bootstrapper.ensure)
     else:
-        register_source("linux", "codex", codex_dir, codex_dir / "sessions", "index_linux.sqlite", parse_codex_session_file, 4)
-        register_source("linux", "claude", claude_dir, claude_dir / "projects", "index_linux_claude.sqlite", parse_claude_session_file, 3, file_filter_fn=claude_filter)
+        register_source("linux", "codex", codex_dir, codex_dir / "sessions", "index_linux.sqlite", parse_codex_session_file, 5)
+        register_source("linux", "claude", claude_dir, claude_dir / "projects", "index_linux_claude.sqlite", parse_claude_session_file, 5, file_filter_fn=claude_filter)
         register_source("linux", "openclaw", openclaw_dir, openclaw_dir / "agents", "index_linux_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter)
 
     hermes_state_db = detect_hermes_state_db(args.hermes_state_db)

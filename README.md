@@ -7,7 +7,10 @@ Local-first, dependency-free web viewer for **Codex CLI**, **Claude Code**, **Op
 - Filter messages by role, and search within a session (highlight + next/prev)
 - Sort sidebar by **start time**, **last activity**, or **value signal**
 - Audit badges per session: files touched, tool count, remote/test/deploy/debug activity, friction, outcome, value score
-- Copy compact or standard agent handoffs with intent, constraints, changes, verification, remaining work, and evidence references
+- **⚡ Usage** panel: token totals per day / project / session (Codex + Claude + OpenCode)
+- **📰 Briefing** panel: daily work summary with highlights, blocked sessions, deliverables, and an optional LLM narrative
+- **🗒 Plans** panel: planning files (`task_plan.md` / `progress.md` / `findings.md`) near the session, read-only
+- Copy compact or standard agent handoffs with intent, constraints, changes, verification, remaining work, and evidence references — plus a themed markdown preview, rich-text copy, and `.md` / `.html` export
 - Highlight interruptions and common error outputs
 
 > Not affiliated with OpenAI or Anthropic. “Codex” and “Claude” are trademarks of their respective owners.
@@ -171,6 +174,20 @@ That writes:
 - **Error highlighting**
   - User interruptions (e.g. `turn_aborted`) are highlighted.
   - Common tool failures (HTTP 4xx/5xx, Traceback/Exception, `Status: error`, etc.) are highlighted.
+- **Insights row** (below the audit actions): **⚡ Usage** opens a token-usage
+  dashboard for the whole source with a range selector (7 days / 30 days /
+  all time); **📰 Briefing** opens a date-scoped work summary (highlights,
+  blocked sessions, deliverables, optional 🤖 LLM narrative); **🗒 Plans**
+  lists planning files (`task_plan.md` / `progress.md` / `findings.md`,
+  `docs/session-plans/*.md`) found near the current session's working
+  directory. Clicking a usage/briefing row opens that session.
+- **Handoff extras**: **👁 Preview** renders the handoff as themed markdown
+  (plain / card / Feishu card — theme persists), **📋 Rich** copies it as
+  rich text, **⬇ .md** / **⬇ .html** download standalone files.
+
+> Note: token usage for Codex/Claude is extracted during indexing (parser
+> v5/v4). On the first start after upgrading, existing sessions are re-parsed
+> once to backfill the usage columns.
 
 ## Privacy & safety notes
 
@@ -180,7 +197,7 @@ That writes:
 
 ## Status
 
-`v1.0.0` is the first stable release. The project is actively maintained; Agent history formats remain external contracts and may require parser updates as their producers evolve.
+`v1.0.0` remains the stable release. `v1.1.0-rc.1` is the current candidate with usage, daily briefings, plan previews and native OpenCode resume commands; independent-user validation is pending. Run `python3 app.py --version` to identify the checkout. The project is actively maintained; Agent history formats remain external contracts and may require parser updates as their producers evolve.
 
 ## License
 

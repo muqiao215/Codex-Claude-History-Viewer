@@ -6,13 +6,14 @@ A dependency-free Python HTTP server indexes local Agent histories into per-sour
 
 ## Repository Map
 
-- `app.py` — transcript parsing, source indexers, API routing, static serving, CLI configuration, and runtime bootstrap.
-- `audit/` — normalized audit schema, evidence extraction, command classification, scoring, optional AI audit, and deterministic handoff generation.
-- `static/` — browser application, markup, and styling; no build pipeline.
+- `app.py` — transcript parsing (incl. token-usage extraction), source indexers, usage/briefing/plan API routes, static serving, CLI configuration, and runtime bootstrap.
+- `audit/` — normalized audit schema, evidence extraction, command classification, scoring, optional AI audit, deterministic handoff generation, and daily-briefing aggregation (`briefing.py`).
+- `static/` — browser application, markup, and styling; no build pipeline. The session header hosts the audit panel plus the `.insight-panel` family (usage / briefing / plans / handoff preview).
 - `tests/` — Python unit/integration tests and Node-based frontend behavior tests.
 - `scripts/` — Linux/Windows launchers, desktop integration, and repository resolution.
 - `demo/` — synthetic transcript fixtures safe for demonstration.
 - `docs/session-plans/` — historical feature plans and delivery records.
+- `DESIGN.md` — visual-system contract (tokens, components, rules) for agent-driven UI changes.
 
 ## Entry Points
 
@@ -36,7 +37,19 @@ A dependency-free Python HTTP server indexes local Agent histories into per-sour
 
 ### Handoff layer
 
-`audit/handoff.py` builds compact or standard continuation capsules from deterministic audit data, selected user constraints, verification results, evidence locations, and current Git state. It intentionally excludes raw transcripts, hidden prompts, reasoning, and full tool output.
+`audit/handoff.py` builds compact or standard continuation capsules from deterministic audit data, selected user constraints, verification results, evidence locations, and current Git state. It intentionally excludes raw transcripts, hidden prompts, reasoning, and full tool output. The frontend renders the selected capsule as themed markdown (`.handoff-theme-*`), copies it as rich text, and exports `.md` / standalone themed `.html`.
+
+### Usage aggregation
+
+Codex parsers fold cumulative `token_count` telemetry into per-session `tokens_*` columns (kept in the `sessions` table alongside audit scores); Claude sums per-message `message.usage`. OpenCode aggregates its own native token columns; Hermes reports zeros. `query_usage` on each indexer powers `GET /api/{system}/{source}/usage` with totals, per-day (viewer-local timezone), per-project, and top-session views. No currency costs are computed.
+
+### Briefing layer
+
+`audit/briefing.py` aggregates one day of session summaries into a deterministic briefing: near-duplicate sessions (same cwd, touched-file Jaccard ≥ 0.5) merge into the higher-value one; highlights, blocked sessions, and deliverables are enriched from at most 12 deterministic audits and any stored AI audits. `GET /briefing` returns the payload plus `render_briefing_markdown` output; `POST /briefing` adds a narrative — LLM (strict JSON) when a provider is configured, a composed heuristic fallback otherwise. The raw transcript is never an input.
+
+### Plan-aware scanning
+
+`scan_plan_files(cwd)` is a stateless, read-only filesystem scan of planning artifacts (`task_plan.md` / `progress.md` / `findings.md` at the root and under `plans/*`, plus `docs/session-plans/*.md`), capped at 80 files / 120 KB bodies, excerpting only well-known `## ` sections. `/plans?project=` and `/session/{id}/plans` (mtime window ±7 days around the session) serve it; nothing is persisted and nothing is written.
 
 ### Browser UI
 
@@ -78,10 +91,11 @@ compact AI audit input or deterministic handoff
 ## Fragile Areas
 
 - `app.py` combines several responsibilities; broad edits can affect unrelated sources or API behavior.
-- Transcript formats differ by tool and evolve over time. Parser changes require fixtures for each affected source.
-- SQLite schema migrations must remain idempotent for existing user caches.
+- Transcript formats differ by tool and evolve over time. Parser changes require fixtures for each affected source. Usage extraction bumps parser versions, forcing a one-time full re-parse.
+- SQLite schema migrations must remain idempotent for existing user caches (usage columns included).
 - Evidence jumps depend on stable message/evidence identifiers across backend and frontend.
 - Frontend tests use lightweight DOM shims, so browser-only APIs need explicit compatibility handling.
+- `scan_plan_files` reads the filesystem on request; its caps (file count, body size, blank-cwd rejection) must not be relaxed, or a request could scan an unintended directory.
 
 ## Read Next
 
@@ -89,5 +103,12 @@ compact AI audit input or deterministic handoff
 - Deterministic evidence or scoring → `audit/` and `tests/test_audit_extractor.py`
 - AI audit behavior → `audit/ai_audit.py`, `audit/llm_client.py`, and `tests/test_ai_audit.py`
 - Agent handoffs → `audit/handoff.py`, `tests/test_handoff.py`, and `docs/session-plans/003-agent-handoff.md`
-- UI interactions → `static/app.js` and the matching `tests/*.js`
+- Token usage → `parse_codex_session_file` / `parse_claude_session_file` in `app.py`, `query_usage` on the indexers, and `tests/test_usage.py`
+- Daily briefings → `audit/briefing.py`, `tests/test_briefing.py`, and `docs/session-plans/004-usage-briefing-plans.md`
+- Plan-aware scanning → `scan_plan_files` / `extract_plan_sections` in `app.py` and `tests/test_plan_aware.py`
+- UI interactions → `static/app.js` and the matching `tests/*.js` (insight panels: `tests/test_insight_panels.js`)
 - Durable tradeoffs → `docs/DECISIONS.md`
+
+## Native session continuation
+
+The existing resume header generates native commands for Codex, Claude and OpenCode. OpenCode uses `opencode --session <id>` with the selected source cwd and validates the native ID before emitting a shell command. The viewer only displays/copies the command; OpenCode owns session loading and mutation. TaskHub adoption is optional orchestration above this path. Native conversation continuity and evidence-based handoff/SpecMesh files serve distinct purposes.

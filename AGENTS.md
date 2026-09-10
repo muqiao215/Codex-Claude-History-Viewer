@@ -1,6 +1,6 @@
 # Project Instructions
 
-This repository follows [SpecMesh v1.0](https://github.com/muqiao215/specmesh).
+This repository follows [SpecMesh v1.1](https://github.com/muqiao215/specmesh).
 
 ## Start Here
 

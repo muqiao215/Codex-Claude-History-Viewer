@@ -1454,3 +1454,386 @@ mark.active {
     overflow: auto;
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * Insight panels (session-plans 004): usage / briefing / plans / handoff
+ * --------------------------------------------------------------------------- */
+
+.insight-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  padding: 10px 12px;
+  margin-top: 8px;
+  max-height: 340px;
+  overflow: auto;
+}
+
+.insight-panel[hidden] {
+  display: none;
+}
+
+.panel-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.panel-toolbar .label {
+  margin: 0;
+}
+
+.insight-empty {
+  padding: 6px 2px;
+  font-size: 12px;
+}
+
+.usage-totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.usage-chip {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 12px;
+  min-width: 72px;
+}
+
+.usage-chip-value {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.usage-chip-label {
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.usage-section {
+  margin-bottom: 10px;
+}
+
+.usage-section .label {
+  margin-bottom: 4px;
+}
+
+.usage-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 12px;
+}
+
+.usage-row-label {
+  flex: 0 0 76px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.usage-row-project {
+  flex-basis: 160px;
+  color: var(--text);
+}
+
+.usage-bar {
+  flex: 1 1 auto;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--system);
+  overflow: hidden;
+}
+
+.usage-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--accent);
+}
+
+.usage-row-value {
+  flex: 0 0 auto;
+  min-width: 56px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-top-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.usage-top-row:hover {
+  background: var(--surface-hover);
+}
+
+.usage-top-title {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+
+.usage-top-meta {
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
+.briefing-outcomes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.briefing-item {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  cursor: pointer;
+}
+
+.briefing-item:hover {
+  border-color: var(--accent);
+}
+
+.briefing-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.briefing-item-title {
+  font-weight: 600;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.briefing-item-meta {
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.briefing-item-goal,
+.briefing-item-next {
+  font-size: 12px;
+  margin-top: 4px;
+  color: var(--text);
+}
+
+.briefing-item-next {
+  color: var(--accent);
+}
+
+.briefing-item-error {
+  font-size: 11px;
+  margin-top: 4px;
+  color: var(--danger-text);
+  background: var(--danger-bg);
+  border-radius: 4px;
+  padding: 3px 6px;
+}
+
+.briefing-narrative {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.briefing-narrative[hidden] {
+  display: none;
+}
+
+.briefing-narrative-head {
+  margin-bottom: 4px;
+}
+
+.briefing-narrative-suggestion {
+  color: var(--accent);
+  margin-top: 4px;
+}
+
+.briefing-date {
+  width: 110px;
+}
+
+.plan-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plan-item {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.plan-item summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.plan-item summary::-webkit-details-marker {
+  display: none;
+}
+
+.plan-name {
+  font-weight: 600;
+}
+
+.plan-path {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.plan-mtime {
+  flex: 0 0 auto;
+}
+
+.plan-section {
+  display: flex;
+  gap: 8px;
+  padding: 4px 2px 0;
+  border-top: 1px dashed var(--border);
+  margin-top: 4px;
+}
+
+.plan-section:first-of-type {
+  border-top: none;
+}
+
+.plan-section-key {
+  flex: 0 0 70px;
+  color: var(--accent);
+  text-transform: capitalize;
+}
+
+.plan-section-body {
+  flex: 1 1 auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 160px;
+  overflow: auto;
+  color: var(--text);
+}
+
+.handoff-body {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 10px 12px;
+  font-size: 13px;
+  overflow: auto;
+  max-height: 260px;
+}
+
+.handoff-body pre {
+  background: var(--code-bg);
+  color: var(--code-fg);
+  border: 1px solid var(--code-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  overflow: auto;
+}
+
+.handoff-body code {
+  background: var(--inline-code-bg);
+  border: 1px solid var(--inline-code-border);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.handoff-body pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.handoff-theme-card {
+  background: linear-gradient(180deg, var(--surface-subtle), var(--panel));
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
+}
+
+.handoff-theme-card h1,
+.handoff-theme-card h2,
+.handoff-theme-card h3 {
+  color: var(--accent);
+}
+
+.handoff-theme-feishu {
+  border: 1px solid rgba(51, 112, 255, 0.35);
+  border-left: 4px solid #3370ff;
+  background: #ffffff;
+  color: #1f2329;
+}
+
+.handoff-theme-feishu h1,
+.handoff-theme-feishu h2,
+.handoff-theme-feishu h3 {
+  color: #3370ff;
+}
+
+.handoff-theme-feishu blockquote {
+  border-left: 3px solid #91baff;
+  margin: 8px 0;
+  padding: 4px 12px;
+  color: #51565d;
+}
+
+.handoff-theme-plain {
+  background: var(--panel);
+}
+
+.btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--surface-hover);
+}
+
+.briefing-truncated-note {
+  border: 1px solid var(--danger-border);
+  border-radius: 6px;
+  background: var(--danger-bg);
+  color: var(--danger-text);
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}

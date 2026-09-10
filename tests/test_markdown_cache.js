@@ -293,6 +293,8 @@ async function loadApp({ fetchImpl, alertImpl } = {}) {
   const sourcePath = path.join(repoDir, "static", "app.js");
   const localStorage = createStorage();
   const document = createDocument();
+  // Node 22 exposes a getter-only navigator; replace it for this DOM fixture.
+  Object.defineProperty(globalThis, "navigator", { value: {}, writable: true, configurable: true });
   Object.assign(globalThis, {
     __CCHV_TEST__: true,
     __testApi: undefined,

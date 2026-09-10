@@ -149,8 +149,18 @@
             <option value="standard" selected>Standard</option>
           </select>
           <button id="copyHandoff" type="button" class="btn small" title="Copy agent handoff" aria-label="Copy agent handoff">📋 Handoff</button>
+          <button id="handoffPreviewBtn" type="button" class="btn small" aria-expanded="false" aria-controls="handoffPanel" title="Render a themed handoff preview">👁 Preview</button>
+          <button id="copyHandoffRich" type="button" class="btn small" title="Copy the handoff as rich text (HTML + plain)">📋 Rich</button>
+          <button id="downloadHandoffMd" type="button" class="btn small" title="Download handoff as Markdown">⬇ .md</button>
+          <button id="downloadHandoffHtml" type="button" class="btn small" title="Download handoff as themed HTML">⬇ .html</button>
           <button id="auditGenerate" type="button" class="btn small" hidden aria-label="Generate AI audit">🤖 Generate Audit</button>
           <button id="auditDelete" type="button" class="btn small danger" hidden aria-label="Delete AI audit">🗑️ Delete Audit</button>
+        </div>
+        <div id="insightActions" class="session-actions insight-actions" style="display:none">
+          <span class="tool-actions-label muted">Insights:</span>
+          <button id="usageToggle" type="button" class="btn small" aria-expanded="false" aria-controls="usagePanel" title="Token usage across sessions in this source">⚡ Usage</button>
+          <button id="briefingToggle" type="button" class="btn small" aria-expanded="false" aria-controls="briefingPanel" title="Daily work briefing for this source">📰 Briefing</button>
+          <button id="planToggle" type="button" class="btn small" aria-expanded="false" aria-controls="planPanel" title="Planning files near this session">🗒 Plans</button>
         </div>
         <div id="toolActions" class="session-actions tool-actions" style="display:none">
           <span class="tool-actions-label muted">Tools:</span>
@@ -158,6 +168,47 @@
           <button id="collapseAllTools" type="button" class="btn small" title="Collapse all tool blocks">▾ Collapse all</button>
         </div>
         <section id="auditPanel" class="audit-panel" hidden aria-live="polite"></section>
+        <section id="handoffPanel" class="insight-panel handoff-panel" hidden aria-live="polite">
+          <div class="panel-toolbar">
+            <span class="label">Handoff preview</span>
+            <select id="handoffTheme" class="handoff-theme" aria-label="Handoff theme">
+              <option value="plain" selected>Plain</option>
+              <option value="card">Card</option>
+              <option value="feishu">Feishu card</option>
+            </select>
+          </div>
+          <div id="handoffPreviewBody" class="handoff-body handoff-theme-plain"></div>
+        </section>
+        <section id="usagePanel" class="insight-panel" hidden aria-live="polite">
+          <div class="panel-toolbar">
+            <span class="label">Token usage</span>
+            <select id="usageRange" class="usage-range" aria-label="Usage range">
+              <option value="7">Last 7 days</option>
+              <option value="30" selected>Last 30 days</option>
+              <option value="0">All time</option>
+            </select>
+            <span id="usageSummary" class="muted"></span>
+          </div>
+          <div id="usageContent"></div>
+        </section>
+        <section id="briefingPanel" class="insight-panel" hidden aria-live="polite">
+          <div class="panel-toolbar">
+            <span class="label">Daily briefing</span>
+            <input id="briefingDate" type="text" class="briefing-date" placeholder="YYYY-MM-DD" inputmode="numeric" />
+            <button id="briefingRefresh" type="button" class="btn small">Refresh</button>
+            <button id="briefingNarrative" type="button" class="btn small" title="Generate a narrative (LLM when configured, heuristic otherwise)">🤖 Narrative</button>
+            <button id="copyBriefingMd" type="button" class="btn small" title="Copy the briefing as Markdown">📋 Copy MD</button>
+          </div>
+          <div id="briefingNarrativeBox" class="briefing-narrative" hidden></div>
+          <div id="briefingContent"></div>
+        </section>
+        <section id="planPanel" class="insight-panel" hidden aria-live="polite">
+          <div class="panel-toolbar">
+            <span class="label">Planning files near this session</span>
+            <span class="muted">read-only</span>
+          </div>
+          <div id="planContent"></div>
+        </section>
       </div>
       <div id="headerResizer" class="resizer horizontal" title="Resize header" aria-label="Resize header"></div>
       <div id="transcriptArea" class="transcript-area">
