@@ -37,7 +37,7 @@ A user can locate and inspect a relevant session quickly, understand its intent,
 
 The stable `v1.0.0` release supports five sources, search and filtering, session/project browsing, compact tool timelines, deterministic value auditing, evidence navigation, optional heuristic or LLM audit, platform-aware launchers, and compact or standard evidence-backed Agent handoffs. OpenCode audit and handoff data are derived from its database without mutating it; Hermes remains browse-only with neutral audit signals.
 
-The v1.1.0-rc.1 candidate adds usage accounting, bounded daily briefings, plan previews,
+The published v1.1.0-rc.1 candidate adds usage accounting, bounded daily briefings, plan previews,
 keyboard access and native OpenCode resume commands. Automated/browser checks have
 previously passed; independent-user trial M3 is still pending. Candidate publication
 does not establish stable product acceptance. CM v0.42.2 separately owns supervised
