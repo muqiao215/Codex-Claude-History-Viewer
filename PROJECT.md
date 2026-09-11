@@ -35,19 +35,13 @@ A user can locate and inspect a relevant session quickly, understand its intent,
 
 ## Current State
 
-The stable `v1.0.0` release supports five sources, search and filtering, session/project browsing, compact tool timelines, deterministic value auditing, evidence navigation, optional heuristic or LLM audit, platform-aware launchers, and compact or standard evidence-backed Agent handoffs. OpenCode audit and handoff data are derived from its database without mutating it; Hermes remains browse-only with neutral audit signals.
+The stable `v1.1.0` release supports five history sources, existing search/audit/handoff features, usage/briefing/plan views and native OpenCode resume commands. It separates parsers/indexers into `history_core`, exposes an explicit headless CLI, and adds a human work overview. Native source databases remain read-only; Hermes keeps its existing limited audit evidence.
 
-The published v1.1.0-rc.1 candidate adds usage accounting, bounded daily briefings, plan previews,
-keyboard access and native OpenCode resume commands. Automated/browser checks have
-previously passed; independent-user trial M3 is still pending. Candidate publication
-does not establish stable product acceptance. CM v0.42.2 separately owns supervised
-adoption; Viewer never writes TaskHub state or source history databases.
-
-The v1.1.0 integration separates existing parsers/indexers into `history_core`, adds an explicit headless CLI and a human workspace homepage. See [implementation boundaries](docs/CODEKIT-INTEGRATION.md).
+Release verification passed 191 Python tests, six Node test files and synthetic HTTP/browser checks. The local service runs v1.1.0. The earlier independent-user M3 trial remains historical unfinished work; the current acceptance priority is real Agent handoff, not that trial. CM owns supervised native adoption and task state. Future multi-device/resident-service gates remain planned; see [implementation boundaries](docs/CODEKIT-INTEGRATION.md).
 
 ## Current Priority
 
-Agent-to-Agent handoff is the primary workflow acceptance target. Keep machine retrieval independent of Web; show people progress, evidence and unresolved decisions before configuration controls. Validate native provider continuation against current repository facts. A synthetic handoff or previous independent-user M3 plan does not establish that acceptance. Current work: [codekit integration](plans/codekit-integration/task_plan.md).
+Agent-to-Agent handoff is the primary workflow acceptance target. Keep machine retrieval independent of Web; show people progress, evidence and unresolved decisions before configuration controls. Validate native provider continuation against current repository facts. A synthetic handoff or previous independent-user M3 plan does not establish that acceptance. Next work: [Agent handoff service](plans/agent-handoff-service/task_plan.md).
 
 ## Knowledge Map
 
