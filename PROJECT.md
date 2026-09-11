@@ -43,17 +43,11 @@ previously passed; independent-user trial M3 is still pending. Candidate publica
 does not establish stable product acceptance. CM v0.42.2 separately owns supervised
 adoption; Viewer never writes TaskHub state or source history databases.
 
-The main structural limitation is that the Python backend remains concentrated in `app.py`; source parsing, indexing, routing, and server bootstrap share one large module.
+The v1.1.0 integration separates existing parsers/indexers into `history_core`, adds an explicit headless CLI and a human workspace homepage. See [implementation boundaries](docs/CODEKIT-INTEGRATION.md).
 
 ## Current Priority
 
-Focus on correctness closure and first-use validation through
-[History Viewer product validation](plans/history-viewer-product-validation/task_plan.md).
-Independently re-review the seven insight-upgrade fixes, verify the real browser path from
-search to evidence-backed handoff, then obtain a first-time user's trial and prepare a
-reviewable release candidate. Passing automated tests alone does not establish product
-acceptance. Keep SpecMesh lightweight; defer new sources, parallel rewrites, and additional
-platform features until this usage loop is validated.
+Agent-to-Agent handoff is the primary workflow acceptance target. Keep machine retrieval independent of Web; show people progress, evidence and unresolved decisions before configuration controls. Validate native provider continuation against current repository facts. A synthetic handoff or previous independent-user M3 plan does not establish that acceptance. Current work: [codekit integration](plans/codekit-integration/task_plan.md).
 
 ## Knowledge Map
 
@@ -67,3 +61,7 @@ platform features until this usage loop is validated.
 - Feature delivery history → [docs/session-plans/](docs/session-plans/)
 
 - Plan status index → [plans/README.md](plans/README.md)
+
+## Approved next direction
+
+The primary coordinating Agent owns cross-project delivery. Repository-owned execution details and current status: [agent-handoff-service](plans/agent-handoff-service/task_plan.md). These future milestones remain planned; current released behavior retains its existing authority.

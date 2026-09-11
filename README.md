@@ -197,8 +197,12 @@ That writes:
 
 ## Status
 
-`v1.0.0` remains the stable release. `v1.1.0-rc.1` is the current candidate with usage, daily briefings, plan previews and native OpenCode resume commands; independent-user validation is pending. Run `python3 app.py --version` to identify the checkout. The project is actively maintained; Agent history formats remain external contracts and may require parser updates as their producers evolve.
+`v1.1.0` adds the shared history core, explicit headless handoff CLI and human work overview alongside the prior candidate features. Real multi-device continuation and resident service milestones remain planned. Run `python3 app.py --version` to identify the checkout. The project is actively maintained; Agent history formats remain external contracts and may require parser updates as their producers evolve.
 
 ## License
 
 MIT (see `LICENSE`).
+
+## Workflow integration (v1.1.0)
+
+See [implementation boundaries and commands](docs/CODEKIT-INTEGRATION.md).

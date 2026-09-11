@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>继续工作 · History Viewer</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/workspace.css">
+</head>
+<body class="workspace-page">
+  <main class="workspace-shell">
+    <header class="workspace-header">
+      <div><h1>继续工作</h1><p class="muted">先看成果、待核对事项，再进入相关历史。</p></div>
+      <nav aria-label="辅助功能"><a class="btn" href="/history">搜索历史与设置</a></nav>
+    </header>
+    <p id="workspaceStatus" class="muted" role="status" aria-live="polite">正在读取工作记录…</p>
+    <section aria-labelledby="attentionTitle"><h2 id="attentionTitle">需要核对</h2><div id="attentionList"></div></section>
+    <section aria-labelledby="resultsTitle"><h2 id="resultsTitle">近期成果与进展</h2><div id="workList"></div></section>
+    <p class="workspace-note muted">这是历史证据快照。当前执行者、任务实时状态和待审批决定需由 CM 确认；续接前仍需检查当前代码与项目计划。</p>
+  </main>
+  <script type="module" src="/workspace.js"></script>
+</body>
+</html>

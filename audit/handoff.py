@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -72,35 +71,8 @@ def _verification_status(run: Dict[str, Any]) -> str:
 
 
 def _git_state(cwd: str) -> Dict[str, Any]:
-    path = Path(str(cwd or ""))
-    if not path.is_dir():
-        return {"available": False}
-    try:
-        root = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=2, check=True,
-        ).stdout.strip()
-        commit = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=2, check=True,
-        ).stdout.strip()
-        status = subprocess.run(
-            ["git", "-C", str(path), "status", "--porcelain=v1", "-z"],
-            capture_output=True, text=True, timeout=2, check=True,
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return {"available": False}
-    dirty_paths = []
-    for entry in status.split("\0"):
-        if len(entry) >= 4 and entry[2] == " ":
-            dirty_paths.append(entry[3:])
-    return {
-        "available": True,
-        "root": root,
-        "commit": commit,
-        "workspace": "dirty" if status.strip() else "clean",
-        "_paths": dirty_paths,
-    }
+    from .git_snapshot import legacy_git_state
+    return legacy_git_state(cwd)
 
 
 def build_handoff_payload(
@@ -177,12 +149,12 @@ def build_handoff_payload(
 
     git_state = _git_state(str(metadata.get("cwd") or ""))
     dirty_paths = set(git_state.pop("_paths", []))
-    cwd = Path(str(metadata.get("cwd") or "."))
+    cwd = Path(git_state["root"]) if git_state.get("available") else None
     touched_dirty = []
     for item in changed:
         path = Path(item["path"])
         try:
-            relative = str(path.relative_to(cwd)) if path.is_absolute() else str(path)
+            relative = str(path.relative_to(cwd)) if path.is_absolute() and cwd is not None else str(path)
         except ValueError:
             relative = str(path)
         if relative in dirty_paths:
@@ -270,6 +242,9 @@ def render_handoff(payload: Dict[str, Any], detail: str = "standard") -> str:
     git_state = payload.get("git") or {}
     if git_state.get("available"):
         lines.append(f"- git: commit {git_state.get('commit') or '-'}, workspace {git_state.get('workspace') or 'unknown'}")
+        lines.append(f"- git observation: export-time {git_state.get('observed_at') or 'unknown'}; historical verification baseline: unknown")
+    elif git_state.get("reason"):
+        lines.append(f"- git unavailable: {git_state['reason']}")
     return "\n".join(lines)
 
 

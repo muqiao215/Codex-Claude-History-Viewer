@@ -150,3 +150,7 @@ Revisit when:
 
 The current workflow has passed independent acceptance and a concrete user need justifies
 an extension. Code cleanup needed to fix an observed defect remains within scope.
+
+## 2026-09-11 — Integrate against existing repository authority
+
+Reuse the existing storage/parsers and keep SpecMesh independently callable. Do not install a second TaskHub from a proposal or equate historical handoff with live completion. The human overview and headless retrieval have separate entry points. See [scope and remaining limits](CODEKIT-INTEGRATION.md). Status: implemented for v1.1.0; broader roadmap gates remain planned.

@@ -4385,9 +4385,17 @@ window.addEventListener("resize", () => {
 async function bootstrapApp() {
   await loadSourceCatalog();
   applyStoredSourceContext();
+  const target = new URLSearchParams(window.location.search);
+  if (target.has("system") && target.has("source")) {
+    currentSystem = normalizeSystem(target.get("system"));
+    currentSource = normalizeSource(target.get("source"), currentSystem);
+    renderSystemTabs();
+    renderSourceTabs();
+  }
   updateResumeCommandLabels();
   loadFilePathFilterFromUrl();
-  reloadList();
+  await reloadList();
+  if (target.get("session")) await fetchSession(target.get("session"));
 }
 
 bootstrapApp();

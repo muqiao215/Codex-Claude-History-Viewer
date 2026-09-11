@@ -6,7 +6,8 @@ A dependency-free Python HTTP server indexes local Agent histories into per-sour
 
 ## Repository Map
 
-- `app.py` — transcript parsing (incl. token-usage extraction), source indexers, usage/briefing/plan API routes, static serving, CLI configuration, and runtime bootstrap.
+- `history_core/` — existing transcript parsers, source indexers, machine service functions and explicit headless CLI.
+- `app.py` — compatibility reexports, API routes, platform source bootstrap and HTTP/static serving.
 - `audit/` — normalized audit schema, evidence extraction, command classification, scoring, optional AI audit, deterministic handoff generation, and daily-briefing aggregation (`briefing.py`).
 - `static/` — browser application, markup, and styling; no build pipeline. The session header hosts the audit panel plus the `.insight-panel` family (usage / briefing / plans / handoff preview).
 - `tests/` — Python unit/integration tests and Node-based frontend behavior tests.
@@ -25,7 +26,7 @@ A dependency-free Python HTTP server indexes local Agent histories into per-sour
 
 ### Transcript adapters and indexes
 
-`app.py` parses Codex, Claude, and OpenClaw JSONL into a shared session/message shape. `Indexer` persists derived records in local SQLite caches. `OpenCodeIndexer` and `HermesStateIndexer` read their tools' existing SQLite state through source-specific adapters.
+`history_core/sources.py` parses Codex, Claude, and OpenClaw JSONL into a shared session/message shape. `Indexer` persists derived records in local SQLite caches. `OpenCodeIndexer` and `HermesStateIndexer` read their tools' existing SQLite state through source-specific adapters.
 
 ### Source routing and HTTP API
 
@@ -112,3 +113,7 @@ compact AI audit input or deterministic handoff
 ## Native session continuation
 
 The existing resume header generates native commands for Codex, Claude and OpenCode. OpenCode uses `opencode --session <id>` with the selected source cwd and validates the native ID before emitting a shell command. The viewer only displays/copies the command; OpenCode owns session loading and mutation. TaskHub adoption is optional orchestration above this path. Native conversation continuity and evidence-based handoff/SpecMesh files serve distinct purposes.
+
+## Workflow boundary (v1.1.0)
+
+See [machine interface and human workspace](CODEKIT-INTEGRATION.md). `/` is now the workspace overview; `/history` retains the full history interface.
