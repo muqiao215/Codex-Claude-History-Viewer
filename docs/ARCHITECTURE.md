@@ -114,6 +114,12 @@ compact AI audit input or deterministic handoff
 
 The existing resume header generates native commands for Codex, Claude and OpenCode. OpenCode uses `opencode --session <id>` with the selected source cwd and validates the native ID before emitting a shell command. The viewer only displays/copies the command; OpenCode owns session loading and mutation. TaskHub adoption is optional orchestration above this path. Native conversation continuity and evidence-based handoff/SpecMesh files serve distinct purposes.
 
+`history_core/native.py` and `python -m history_core ... native-reference` provide the
+independent machine path. The query-only v2 reference includes configured device/store
+identity and the complete selected native content revision. CM consumes this CLI without
+Web and independently validates the source before its own execution admission. See the
+[byte contract and limits](native-session-contract.md); Viewer's output is context-only.
+
 ## Workflow boundary (v1.1.0)
 
 See [machine interface and human workspace](CODEKIT-INTEGRATION.md). `/` is now the workspace overview; `/history` retains the full history interface.

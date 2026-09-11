@@ -2,6 +2,7 @@
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .service import handoff, search
@@ -24,10 +25,22 @@ def main(argv=None):
     query.add_argument("--project", default=None)
     transfer = commands.add_parser("handoff")
     transfer.add_argument("session_id")
+    native = commands.add_parser("native-reference", help="Read a content-bound reference for explicit native continuation")
+    native.add_argument("session_id")
+    native.add_argument("--device-id", required=True, help="Stable local device identity from the coordinator configuration")
     args = parser.parse_args(argv)
     indexer = None
     try:
         source = args.source_path.resolve(strict=True)
+        if args.command == "native-reference":
+            if args.source != "opencode":
+                raise ValueError("native_reference_provider_unsupported")
+            from .native import native_reference
+            result = {"schema_version": "history.native_candidate.v2", "authorization": "context_only",
+                      "observed_at": datetime.now(timezone.utc).isoformat(),
+                      "reference": native_reference(source, args.device_id, args.session_id)}
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
         if args.source in ("opencode", "hermes"):
             if not source.is_file():
                 raise ValueError("native_database_file_required")

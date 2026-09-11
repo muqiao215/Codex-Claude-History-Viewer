@@ -2,7 +2,7 @@
 
 ## Status / owner
 
-Status: planned evolution after shared-core/headless-CLI implementation. Owner: Viewer maintainers; CM owns task execution and global coordination. Agent handoff is the primary workflow acceptance objective; independent-user trial does not replace it.
+Status: in_progress after shared-core/headless-CLI implementation. Owner: Viewer maintainers; CM owns task execution and global coordination. Agent handoff is the primary workflow acceptance objective; independent-user trial does not replace it.
 
 ## Observed baseline
 
@@ -20,8 +20,8 @@ Machine interface: bounded explicit-source queries, deterministic schema-version
 |---|---|---|---|
 | HV-H0 | Stabilize `history_core` capability boundary; separate legacy mutators from read service | Machine imports never start HTTP/background/model; deny source writes and path escape | planned |
 | HV-H1 | Incremental index lifecycle, freshness/cursor and bounded daemon | Restart resumes cursor, source rotation/deletion handled, caps CPU/RAM/backlog, CLI works without daemon | planned |
-| HV-H2 | Versioned candidate/handoff envelope consumed by CM headlessly | Full identity/revision, provenance, observed time, source evidence, repository binding, unknown state; contract fixtures in both repos | planned |
-| HV-H3 | Real Agent continuation acceptance with CM | Selected original provider session receives bounded task; context recalled and current repo checked; output accepted by task owner | planned |
+| HV-H2 | Versioned candidate/handoff envelope consumed by CM headlessly | Full identity/revision, provenance, observed time, source evidence, repository binding, unknown state; contract fixtures in both repos | in_progress: native-reference v2 and independent CM revalidation implemented; broader handoff envelope remains |
+| HV-H3 | Real Agent continuation acceptance with CM | Selected original provider session receives bounded task; context recalled and current repo checked; output accepted by task owner | in_progress: actual same-session recall/current-file canary passed; full matrix remains |
 | HV-H4 | Human overview consumes authorized live task facts separately from history | Progress/result/blocker/decision/next-action navigation; no ambiguous completion or settings-heavy first screen | planned |
 | HV-H5 | Packaging/platform and privacy acceptance | Linux and supported Windows/WSL paths, clean install, upgrade/cache migration, source DB unchanged, no unintended network requests | planned |
 
@@ -42,4 +42,4 @@ Keep source databases immutable. Derived indexes can be rebuilt; retain schema-v
 
 CM execution and native identity authority: https://github.com/muqiao215/ControlMesh/blob/main/plans/runtime-convergence/task_plan.md
 SpecMesh reviewed continuity gate: https://github.com/muqiao215/specmesh/blob/main/plans/independent-plugin-port/task_plan.md
-Next: define HV-H2 candidate envelope against existing `NativeSessionRef` and `history_core.service.handoff`; do not create a competing TaskHub.
+Next: integrate [native-reference v2](../../docs/native-session-contract.md) with bounded service/index lifecycle and the broader handoff envelope. Extend the real continuation matrix without creating a competing TaskHub.
