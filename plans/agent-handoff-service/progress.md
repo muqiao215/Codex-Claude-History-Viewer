@@ -2,6 +2,15 @@
 
 ## Current
 
+Codex native-reference is implemented in the real checkout after the prepared patch
+was applied. The independent strict rollout reader matches CM CodexSessionStore for
+synthetic Unicode data, binds file/content/device identity and leaves native files
+unchanged. The headless CLI returns context_only without creating an index or Web
+service. All 206 Python tests passed, including 15 native-reference tests and the
+cross-repository TypeScript comparison (/tmp/cm-restored-history-full.log).
+Normal CM Codex adoption and real native Codex continuation remain pending; this
+increment is a candidate-reference capability, not full HV-H3 acceptance or a release.
+
 HV-H2/H3 in progress. OpenCode and Claude native-reference v2 are consumed by CM. The local
 CM candidate now has scoped real Claude History adoption/current-file write and retained recovery
 acceptance. The broader handoff envelope, resident service and full continuation matrix remain open.

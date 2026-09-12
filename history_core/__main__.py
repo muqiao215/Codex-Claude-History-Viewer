@@ -33,11 +33,12 @@ def main(argv=None):
     try:
         source = args.source_path.resolve(strict=True)
         if args.command == "native-reference":
-            if args.source not in ("opencode", "claude"):
+            if args.source not in ("opencode", "claude", "codex"):
                 raise ValueError("native_reference_provider_unsupported")
             from .native import native_reference
             from .claude_native import claude_native_reference
-            reference = native_reference if args.source == "opencode" else claude_native_reference
+            from .codex_native import codex_native_reference
+            reference = {"opencode": native_reference, "claude": claude_native_reference, "codex": codex_native_reference}[args.source]
             result = {"schema_version": "history.native_candidate.v2", "authorization": "context_only",
                       "observed_at": datetime.now(timezone.utc).isoformat(),
                       "reference": reference(args.source_path, args.device_id, args.session_id)}

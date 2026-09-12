@@ -129,3 +129,10 @@ canonical main-session JSONL file. Full raw bytes determine its revision; the to
 parser remains separate. CM independently validates the same provider-specific byte contract
 through its ClaudeSessionStore/ClaudeHistoryClient. Neither reader invokes a model or grants
 execution authority; actual Claude runtime continuation remains a separate acceptance gate.
+
+Codex native references use `history_core/codex_native.py` for one explicit canonical
+rollout JSONL file. The bounded reader binds device, file identity, complete bytes,
+workspace and model; it rejects incomplete or mixed-identity records. The existing
+headless `native-reference` command returns only context authority. Its reference is
+cross-checked against CM's independent CodexSessionStore; task adoption, idle/turn
+validation and execution permission remain CM responsibilities.

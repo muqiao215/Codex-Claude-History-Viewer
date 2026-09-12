@@ -15,3 +15,10 @@ are stricter than display parsing and reject incomplete or changing source snaps
 Real read-only inspection of an existing local Claude/MiniMax-M3 history agreed with CM's
 independent implementation in 197 ms. Source bytes and mtime were unchanged; no provider/model
 call occurred. This proves source agreement only, not resumed execution or provider readiness.
+
+Codex history search was already supported, but native-reference explicitly rejected
+Codex. codex_native.py now exposes a strict context-only reference from one configured
+rollout file. CM must still choose the registered path, independently validate it,
+check completed/idle lineage and issue task authority. Python/TS use identical
+codex-rollout-store-v1, codex-project-v1 and codex-rollout-content-v1 namespaces;
+content edits and inode replacement invalidate earlier references.
