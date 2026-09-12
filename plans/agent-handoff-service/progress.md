@@ -2,17 +2,32 @@
 
 ## Current
 
-HV-H2/H3 in progress. OpenCode native-reference v2 is consumed by CM. Current increment adds
-Claude JSONL native identity and independent CM revalidation. It does not claim Claude runtime
-execution, resident-service or full continuation-matrix acceptance.
+HV-H2/H3 in progress. OpenCode and Claude native-reference v2 are consumed by CM. The local
+CM candidate now has scoped real Claude History adoption/current-file write and retained recovery
+acceptance. The broader handoff envelope, resident service and full continuation matrix remain open.
 
 ## Done
+
+2026-09-12 integration: the existing headless Claude refresh/search/native-reference commands fed
+CM's normal local adoption controller without Web. Preparation returned context-only, did not
+execute a model, and survived reopen. One bounded corrective input resumed the original JSONL
+after a recorded max-turns failure, recalled an old marker absent from the new prompt, read seven
+current SpecMesh files and wrote the exact marker/current-file result. Eight reads and one write
+completed in ten native turns. CM recovered the retained result without a model, including a
+deliberate loss of completion after publication and idempotent reopen/reacceptance.
+
+Independent original-source/control/tool-receipt/database/file readback accepted this scoped
+result and found no owned processes. Initial failed attempts and a final diagnostic-report byte-
+digest mistake remain recorded separately. CM runtime validation passed 443 tests; this is not a
+new History test run or installed service release. See the pinned
+[CM implementation and limits](https://github.com/muqiao215/ControlMesh/blob/c364582a395f1454445316e78db429e85561e9a5/plans/runtime-convergence/progress.md).
+The strict native execution/lineage owner remains CM; History's tolerant display parser is unchanged.
 
 Claude source increment: strict main-session JSONL reference, shared byte fixture and headless
 CLI support; CM independently implements the same revision and revalidates the candidate.
 Python suite passed **201 tests**. Real existing-source inspection agreed in **197 ms**, with
-unchanged source bytes/mtime and zero model calls. No Web or index cache was started. Full native
-Claude execution/preflight/recovery remains pending; no universal memory guarantee is asserted.
+unchanged source bytes/mtime and zero model calls. No Web or index cache was started for that
+earlier explicit-source inspection; full provider/device coverage remains pending.
 
 Implemented `history_core/native.py` and the explicit `native-reference` CLI command. Identity includes device, native file identity, directory/project and a complete content revision; the source is query-only and bounded. Python/TS share a synthetic byte-protocol fixture. Full Python suite passed 195 tests on 2026-09-11.
 

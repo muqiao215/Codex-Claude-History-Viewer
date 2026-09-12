@@ -42,4 +42,12 @@ CM's `ClaudeSessionStore` independently implements this byte protocol. `ClaudeHi
 invokes the bounded CLI against its configured source file and revalidates the resulting
 context-only reference locally. This is an integration seam for the native Claude runtime;
 the existing CM one-shot Claude command remains ephemeral. Real native execution, current
-grant enforcement, preflight and retained-turn recovery are separate required gates.
+grant enforcement, preflight and retained-turn recovery are separate gates. The CM local candidate
+now has scoped acceptance of headless Claude refresh/search/adoption, original-session resume,
+current-file writes and zero-model retained recovery; see
+[the pinned local adoption contract](https://github.com/muqiao215/ControlMesh/blob/c364582a395f1454445316e78db429e85561e9a5/plans/runtime-convergence/claude-continuity-design.md#local-history-adoption-contract).
+The candidate uses a separate private derived cache for directory refresh/search and the exact
+configured JSONL for native-reference. Search does not implicitly refresh. Unsupported native
+lineage, task authorization and completion are evaluated by CM; this reference format is not a
+completion or universal-memory guarantee. Resident-service and cross-provider/device matrices
+remain separate work.
