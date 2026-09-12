@@ -123,3 +123,9 @@ Web and independently validates the source before its own execution admission. S
 ## Workflow boundary (v1.1.0)
 
 See [machine interface and human workspace](CODEKIT-INTEGRATION.md). `/` is now the workspace overview; `/history` retains the full history interface.
+
+Claude native references use `history_core/claude_native.py`, a strict reader of one explicit
+canonical main-session JSONL file. Full raw bytes determine its revision; the tolerant display
+parser remains separate. CM independently validates the same provider-specific byte contract
+through its ClaudeSessionStore/ClaudeHistoryClient. Neither reader invokes a model or grants
+execution authority; actual Claude runtime continuation remains a separate acceptance gate.

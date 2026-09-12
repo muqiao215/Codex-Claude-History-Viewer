@@ -2,9 +2,17 @@
 
 ## Current
 
-HV-H2/H3 in progress. Headless native-reference v2 is implemented and consumed by CM's TS worker. Full resident-service, platform and continuation-matrix gates remain open.
+HV-H2/H3 in progress. OpenCode native-reference v2 is consumed by CM. Current increment adds
+Claude JSONL native identity and independent CM revalidation. It does not claim Claude runtime
+execution, resident-service or full continuation-matrix acceptance.
 
 ## Done
+
+Claude source increment: strict main-session JSONL reference, shared byte fixture and headless
+CLI support; CM independently implements the same revision and revalidates the candidate.
+Python suite passed **201 tests**. Real existing-source inspection agreed in **197 ms**, with
+unchanged source bytes/mtime and zero model calls. No Web or index cache was started. Full native
+Claude execution/preflight/recovery remains pending; no universal memory guarantee is asserted.
 
 Implemented `history_core/native.py` and the explicit `native-reference` CLI command. Identity includes device, native file identity, directory/project and a complete content revision; the source is query-only and bounded. Python/TS share a synthetic byte-protocol fixture. Full Python suite passed 195 tests on 2026-09-11.
 
