@@ -10,13 +10,14 @@
 <body class="workspace-page">
   <main class="workspace-shell">
     <header class="workspace-header">
-      <div><h1>继续工作</h1><p class="muted">先看成果、待核对事项，再进入相关历史。</p></div>
-      <nav aria-label="辅助功能"><a class="btn" href="/history">搜索历史与设置</a></nav>
+      <div><h1>继续工作</h1><p class="muted">查看历史进展、成果与下一步，沿证据继续工作。</p></div>
+      <nav aria-label="辅助功能"><button id="workspaceRetry" class="btn" type="button">重新读取</button> <a class="btn" href="/history">搜索历史与设置</a></nav>
     </header>
     <p id="workspaceStatus" class="muted" role="status" aria-live="polite">正在读取工作记录…</p>
+    <div id="sourceStatus" role="status" aria-live="polite"></div>
     <section aria-labelledby="attentionTitle"><h2 id="attentionTitle">需要核对</h2><div id="attentionList"></div></section>
-    <section aria-labelledby="resultsTitle"><h2 id="resultsTitle">近期成果与进展</h2><div id="workList"></div></section>
-    <p class="workspace-note muted">这是历史证据快照。当前执行者、任务实时状态和待审批决定需由 CM 确认；续接前仍需检查当前代码与项目计划。</p>
+    <section aria-labelledby="resultsTitle"><h2 id="resultsTitle">近期完成记录</h2><div id="workList"></div></section>
+    <p class="workspace-note muted">这是历史证据快照。CM 未连接：当前执行者、任务实时状态和待审批决定均为 unknown；续接前仍需检查当前代码与项目计划。</p>
   </main>
   <script type="module" src="/workspace.js"></script>
 </body>

@@ -16,3 +16,14 @@ body.workspace-page { display:block; height:auto; min-height:100vh; overflow:aut
 .workspace-note { border-top:1px solid var(--border); margin-top:32px; padding-top:16px; line-height:1.7; }
 .workspace-shell :focus-visible { outline:2px solid var(--accent); outline-offset:4px; }
 @media(max-width:600px) { .workspace-shell { padding:20px 16px; } .workspace-header { align-items:flex-start; flex-direction:column; gap:12px; } .workspace-header h1 { font-size:24px; } }
+.workspace-header nav { display:flex; flex-wrap:wrap; gap:8px; }
+.workspace-shell { box-sizing:border-box; min-width:0; }
+.workspace-shell section, .work-record, .work-fact { min-width:0; }
+.work-facts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px 24px; }
+.work-fact h4 { margin:10px 0 6px; font-size:13px; }
+.work-fact ul { margin:0; }
+.work-fact p, #workspaceStatus, #sourceStatus { overflow-wrap:anywhere; }
+.work-fact { padding-left:12px; border-left:2px solid var(--border); }
+.work-warning { background:var(--surface-subtle); border-left:3px solid var(--accent); padding:8px 12px; overflow-wrap:anywhere; }
+.workspace-header button { font:inherit; cursor:pointer; }
+@media(max-width:700px) { .work-facts { grid-template-columns:minmax(0,1fr); gap:4px; } }

@@ -20,6 +20,7 @@ own normaliser that yields :class:`AuditEvent`. Everything downstream is shared.
 from __future__ import annotations
 
 import json
+import io
 import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
@@ -580,7 +581,7 @@ def _truncate(text: str, limit: int) -> str:
 # Line streaming with head/tail reconnaissance + large line tolerance.
 # ---------------------------------------------------------------------------
 
-def _iter_jsonl(path: Path) -> Iterator[Tuple[int, Optional[Dict[str, Any]]]]:
+def _iter_jsonl(path: Path, content: Optional[bytes] = None) -> Iterator[Tuple[int, Optional[Dict[str, Any]]]]:
     """Yield ``(line_no, obj)`` for every parseable line.
 
     Oversized uninteresting lines are skipped silently (they still increment
@@ -588,7 +589,8 @@ def _iter_jsonl(path: Path) -> Iterator[Tuple[int, Optional[Dict[str, Any]]]]:
     can count ``parse_errors``.
     """
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as f:
+        stream = io.StringIO(content.decode("utf-8", errors="replace")) if content is not None else path.open("r", encoding="utf-8", errors="replace")
+        with stream as f:
             for line_no, raw in enumerate(f, start=1):
                 if len(raw) > MAX_LINE_BYTES:
                     if not any(hint in raw for hint in INTERESTING_HINTS):
@@ -733,6 +735,7 @@ def extract_session_audit(
     source: str,
     *,
     session_id_hint: Optional[str] = None,
+    content: Optional[bytes] = None,
 ) -> Optional[AuditPayload]:
     """Build the deterministic AuditPayload for one transcript file.
 
@@ -752,7 +755,7 @@ def extract_session_audit(
     ended_at: Optional[int] = None
     model = ""
 
-    for line_no, obj in _iter_jsonl(path):
+    for line_no, obj in _iter_jsonl(path, content=content):
         if obj is None:
             parse_errors += 1
             continue
@@ -786,6 +789,12 @@ def extract_session_audit(
         ended_at=ended_at or 0,
         parse_errors=parse_errors,
     )
+
+
+def extract_session_audit_bytes(content: bytes, source: str, *, session_id_hint: Optional[str] = None) -> Optional[AuditPayload]:
+    """Extract a caller-bounded in-memory snapshot without opening a file."""
+    return extract_session_audit(Path("selected.jsonl"), source,
+                                 session_id_hint=session_id_hint, content=content)
 
 
 def build_audit_from_events(

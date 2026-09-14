@@ -17,6 +17,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests
+      - run: python scripts/verify_release.py --report work/release-smoke.json
   frontend:
     runs-on: ubuntu-latest
     steps:

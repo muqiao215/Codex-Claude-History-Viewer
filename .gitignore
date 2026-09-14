@@ -5,3 +5,6 @@ __pycache__/
 .omo/
 .playwright-mcp/
 demo/.recall.db
+
+# Local generated benchmark datasets and derived evidence
+work/

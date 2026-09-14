@@ -37,7 +37,7 @@ Codex CLI and Claude Code both generate local, machine-readable transcripts (JSO
 
 Requirements:
 
-- Python 3.8+ (standard library only)
+- Python 3.11+ (standard library only)
 - A modern browser
 
 Run:
@@ -87,10 +87,7 @@ python3 app.py --help
 This repo includes a small set of **synthetic** Codex/Claude logs under `demo/` so you can try the UI without using your own transcripts.
 
 ```bash
-python3 app.py \
-  --codex-dir ./demo/codex \
-  --claude-dir ./demo/claude \
-  --data-dir ./demo/.data
+python3 app.py --demo --data-dir ./demo/.data
 ```
 
 Common examples:
@@ -206,3 +203,30 @@ MIT (see `LICENSE`).
 ## Workflow integration (v1.1.0)
 
 See [implementation boundaries and commands](docs/CODEKIT-INTEGRATION.md).
+
+
+## Linux independent delivery (v1.2.0)
+
+The default page shows progress, outcomes, blockers, decisions, next steps and evidence.
+Use **Search history and settings** for the detailed history tools. Historical completion
+and command results are never presented as verification of the current code.
+
+```bash
+python3 app.py --demo --data-dir ~/.cache/cchv
+python3 -m history_core --source codex --source-path /path/to/sessions --data-dir /path/to/cache refresh
+python3 -m history_core --source codex --source-path /path/to/sessions --data-dir /path/to/cache search --limit 20
+```
+
+Demo uses packaged synthetic sources and an isolated `demo-isolated` cache child; it does
+not discover private native databases. Machine pagination returns `index_revision`: pass
+it as `--index-revision` with subsequent `--offset` requests. A changed revision requires
+starting from offset 0. Search freshness remains explicitly unknown until a new refresh.
+
+`handoff SESSION_ID [--include-plans]` adds source identity, bounded source content revision,
+historical project claims, evidence baseline/unknowns and optional unverified plan-file
+candidates. JSONL source reads are capped at 2 MiB; truncated sources have unknown full
+revision. Native databases remain read-only, with provider-specific audit limits. There
+is no execution or new authorization in a handoff. Weak-session bulk cleanup is disabled.
+
+This release is validated on **Linux, Python 3.11/3.12**. Windows/WSL compatibility code
+remains present but is not newly certified. See [release validation and rollback](docs/release-v1.2.0.md).

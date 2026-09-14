@@ -1,5 +1,7 @@
 # Agent handoff service and human work overview
 
+> 2026-09-14 承接说明：当前执行方向改为 [History 独立、有界交付](../bounded-delivery/task_plan.md)，状态 queued。下文保存原始阶段、范围和局部验收历史，不再作为自动推进队列。HV-H0/H1/H2/H4/H5 映射到新计划的五个独立阶段；HV-H3 经 CM 的受监督原生执行归 CM，不阻塞 History 独立发布或用户直接执行显式 resume command。旧 partial 证据继续保留，未据此补记完成。
+
 ## Status / owner
 
 Status: in_progress after shared-core/headless-CLI implementation. Owner: Viewer maintainers; CM owns task execution and global coordination. Agent handoff is the primary workflow acceptance objective; independent-user trial does not replace it.

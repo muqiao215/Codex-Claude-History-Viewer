@@ -19,7 +19,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .extractor import build_audit_from_events, extract_session_audit, make_evidence_id
+from .extractor import build_audit_from_events, extract_session_audit, extract_session_audit_bytes, make_evidence_id
 from .schema import AuditPayload, to_llm_audit_input
 
 # Bump when the payload shape / scoring formula changes enough that cached
@@ -142,6 +142,7 @@ __all__ = [
     "build_audit_for_file",
     "deserialize_audit_summary",
     "extract_session_audit",
+    "extract_session_audit_bytes",
     "make_evidence_id",
     "patch_db_for_audit",
     "serialize_audit_fields",

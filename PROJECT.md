@@ -7,10 +7,11 @@ Codex CLI, Claude Code, OpenClaw, OpenCode, and Hermes leave useful local sessio
 ## User Intent
 
 - Find past Agent sessions, commands, patches, decisions, and discussions quickly.
-- Resume a selected native provider session directly when available; native conversation context and verified SpecMesh project files are complementary layers. TaskHub adoption is not a prerequisite for native continuation.
+- Provide explicit resume commands for a selected native provider session when available. The user can execute them through their selected native CLI or choose CM for supervised adoption; TaskHub is not a prerequisite. Native conversation context and verified SpecMesh project files are complementary layers.
 - See the practical value of a session: what changed, what was tested, where it failed, and whether the request converged.
 - Continue work from compact, evidence-backed handoff context instead of replaying an entire transcript.
 - Keep private development history on the user's machine by default.
+- Deliver history retrieval, evidence and explicit resume commands independently of CM. History does not execute provider sessions; the user-selected native CLI or optional CM owns execution, and live CM facts are an optional adapter.
 
 ## Non-goals
 
@@ -26,7 +27,7 @@ A user can locate and inspect a relevant session quickly, understand its intent,
 
 ## Constraints
 
-- Python 3.8+ standard library only for the application runtime.
+- Python 3.11+ standard library only for the application runtime.
 - Modern browser frontend without a build step.
 - Local-first storage and processing; network AI audit is optional and explicit.
 - Must tolerate evolving and partially malformed transcript formats.
@@ -37,16 +38,18 @@ A user can locate and inspect a relevant session quickly, understand its intent,
 
 The stable `v1.1.0` release supports five history sources, existing search/audit/handoff features, usage/briefing/plan views and native OpenCode resume commands. It separates parsers/indexers into `history_core`, exposes an explicit headless CLI, and adds a human work overview. Native source databases remain read-only; Hermes keeps its existing limited audit evidence.
 
-Release verification passed 191 Python tests, six Node test files and synthetic HTTP/browser checks. The local service runs v1.1.0. The earlier independent-user M3 trial remains historical unfinished work; the current acceptance priority is real Agent handoff, not that trial. CM owns supervised native adoption and task state. Future multi-device/resident-service gates remain planned; see [implementation boundaries](docs/CODEKIT-INTEGRATION.md).
+The v1.1.0 release record reports 191 Python tests, six Node test files and synthetic HTTP/browser checks; these are dated evidence. The current main checkout also includes later OpenCode/Claude/Codex native-reference work. A version string alone does not prove release, installation and running-process alignment. Local runtime state is not continuously verified; see the dated [baseline and limits](plans/bounded-delivery/findings.md). The earlier independent-user M3 trial remains historical unfinished work. CM owns supervised adoption, execution and task state when selected; direct native CLI execution remains available. CM's real continuation matrix does not block History's independent delivery.
 
 ## Current Priority
 
-Agent-to-Agent handoff is the primary workflow acceptance target. Keep machine retrieval independent of Web; show people progress, evidence and unresolved decisions before configuration controls. Validate native provider continuation against current repository facts. A synthetic handoff or previous independent-user M3 plan does not establish that acceptance. Next work: [Agent handoff service](plans/agent-handoff-service/task_plan.md).
+当前排队优先级：独立 SpecMesh 第一，History 第二，CM 第三。History 采用[独立、有界交付计划](plans/bounded-delivery/task_plan.md)：复用 headless 检索，隔离机器只读能力，验证增量可靠性与规模，再收口带来源交接、人的结果优先界面和独立发布。保留显式 resume command，执行由用户选定原生 CLI 或可选 CM 承担；受监督接管矩阵由 CM 验收。当前 CM 事实可选，未连接时明确 unknown。机器只读与增量性能子卡已验收，完整交付收口中。用户现已授权一次性完成 Linux 为主的完整交付；不使用 Goal 或定时续跑。
 
 ## Knowledge Map
 
-- Release alignment → [plans/release-alignment/](plans/release-alignment/)
-- Current product validation → [plans/history-viewer-product-validation/](plans/history-viewer-product-validation/)
+- Current delivery plan (queued) → [plans/bounded-delivery/](plans/bounded-delivery/)
+- Earlier Agent handoff implementation and partial evidence → [plans/agent-handoff-service/](plans/agent-handoff-service/)
+- Dated release alignment → [plans/release-alignment/](plans/release-alignment/)
+- Historical product validation / unfinished M3 → [plans/history-viewer-product-validation/](plans/history-viewer-product-validation/)
 
 - How the system works → [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - Why durable choices were made → [docs/DECISIONS.md](docs/DECISIONS.md)
@@ -58,4 +61,4 @@ Agent-to-Agent handoff is the primary workflow acceptance target. Keep machine r
 
 ## Approved next direction
 
-The primary coordinating Agent owns cross-project delivery. Repository-owned execution details and current status: [agent-handoff-service](plans/agent-handoff-service/task_plan.md). These future milestones remain planned; current released behavior retains its existing authority.
+本项目自行验收和发布；执行细节与冻结分母以 [bounded-delivery](plans/bounded-delivery/task_plan.md) 为准。用户于 2026-09-14 明确开始独立交付；HV-H0.1 与 HV-H1.2 已完成工作树验收，五阶段仍 0/5；增量/合成性能结果及后续阶段缺口见当前计划。既有主工作区和直接 push 授权保留，不强制另建 worktree/PR。

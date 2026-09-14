@@ -136,3 +136,40 @@ workspace and model; it rejects incomplete or mixed-identity records. The existi
 headless `native-reference` command returns only context authority. Its reference is
 cross-checked against CM's independent CodexSessionStore; task adoption, idle/turn
 validation and execution permission remain CM responsibilities.
+
+
+### Machine read capability boundary
+
+`history_core.HistoryReader` is the public machine object used by the headless CLI for
+explicit refresh, health, search and handoff. It composes private legacy indexers without
+forwarding mutation methods or connections. The Web continues using legacy adapters.
+JSONL caches live under a source-path-bound machine subdirectory, disjoint from the source;
+old CLI caches are retained but not reused, so first use requires explicit refresh.
+Linked source/cache entries and cached handoff paths outside the selected source fail
+explicitly. This is an application capability boundary, not a Python process sandbox.
+Machine pagination adds an ID tie-breaker for fixed index content; pagination across
+refresh revisions is not yet guaranteed. Search and health report freshness unknown.
+Construction/refresh validate the source tree; cached search validates only the selected
+root and cache. Handoff checks the selected path lexically and after resolution, rejects
+linked components, and explicitly opens that file so read errors cannot become empty audits.
+
+JSONL refresh enumerates before reconciliation, streams one parsed session at a time into
+one SQLite transaction, and rolls back on parse/read/observed-change errors. Only successful
+scans delete derived records for absent paths. A stat signature (mtime/ctime nanoseconds,
+size/device/inode) detects the tested replacements; old rows without a signature are reparsed.
+It is not a cryptographic content revision or a guarantee against concurrent adversarial edits.
+Indexes match the pinned predicate and timestamp/ID order, with a separate project prefix;
+they preserve existing LIKE matching while avoiding duplicate scans and unnecessary sorting.
+
+
+### Linux independent delivery v1.2
+
+Machine pages include a cache revision, changed atomically with successful index updates.
+Subsequent processes supply that revision; a mismatch rejects the page and requires a
+restart. Native-store page revisions conservatively include database/WAL stat identities.
+Ordinary handoff audits an in-memory bounded source snapshot; unrequested project Git
+state is not inspected, and historical code baseline remains unknown. Optional plan-file
+context requires an explicit include-plans flag. The workspace displays historical evidence
+as such and surfaces background refresh failures. Demo caches always use a separate child
+directory. Release archives embed commit/file hashes; the runtime exposes its actual build
+identity through /api/version.

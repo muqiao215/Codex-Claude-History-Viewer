@@ -972,11 +972,16 @@ def parse_codex_session_file(path: Path):
         search_parts.append(text)
         search_len += len(text)
 
+    valid_json_count = 0
     try:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
+                line_str = line.strip()
+                if not line_str:
+                    continue
                 try:
                     obj = json.loads(line)
+                    valid_json_count += 1
                 except Exception:
                     messages.append({
                         "ts_ms": start_ts_ms or end_ts_ms or 0,
@@ -1112,6 +1117,9 @@ def parse_codex_session_file(path: Path):
                     add_raw_message(messages, ts_ms, "other", obj, reason=f"type:{obj_type or 'unknown'}")
     except FileNotFoundError:
         return None
+
+    if valid_json_count == 0:
+        raise ValueError("invalid_session_file: %s" % path)
 
     if not session_id:
         session_id = f"file-{path.stem}"
@@ -1388,11 +1396,13 @@ def parse_claude_session_file(path: Path):
                 if first_line and first_line.strip().lower() != "warmup":
                     title = first_line[:80]
 
+    valid_json_count = 0
     try:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
                 try:
                     obj = json.loads(line)
+                    valid_json_count += 1
                 except Exception:
                     add_message(start_ts_ms or end_ts_ms or 0, "other", "raw_json:malformed_line", f"```\n{line.rstrip()}\n```", count_for_stats=False)
                     continue
@@ -1485,6 +1495,9 @@ def parse_claude_session_file(path: Path):
                 add_raw_message(messages, ts_ms, role or "other", obj, reason=f"claude_role:{role or 'unknown'}")
     except FileNotFoundError:
         return None
+
+    if valid_json_count == 0:
+        raise ValueError("invalid_session_file: %s" % path)
 
     if not session_id:
         session_id = f"file-{path.stem}"
@@ -1693,11 +1706,13 @@ def parse_openclaw_session_file(path: Path):
                 if first_line:
                     title = first_line[:80]
 
+    valid_json_count = 0
     try:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
                 try:
                     obj = json.loads(line)
+                    valid_json_count += 1
                 except Exception:
                     add_message(start_ts_ms or end_ts_ms or 0, "other", "raw_json:malformed_line", f"```\n{line.rstrip()}\n```", count_for_stats=False)
                     continue
@@ -1796,6 +1811,9 @@ def parse_openclaw_session_file(path: Path):
                     add_raw_message(messages, ts_ms, role, message, reason=f"openclaw_role:{role or 'unknown'}")
     except FileNotFoundError:
         return None
+
+    if valid_json_count == 0:
+        raise ValueError("invalid_session_file: %s" % path)
 
     if not session_id:
         session_id = f"file-{path.stem}"
@@ -1912,6 +1930,16 @@ class Indexer:
                 cur.execute("ALTER TABLE sessions ADD COLUMN pinned INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+            try:
+                cur.execute("ALTER TABLE sessions ADD COLUMN file_signature TEXT")
+            except sqlite3.OperationalError:
+                pass
+            # Match the paged reader's pinned predicate and timestamp/id ordering.
+            # In particular, an empty pinned set must not scan every search blob.
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_pinned_last ON sessions(COALESCE(pinned,0), end_ts_ms DESC, start_ts_ms DESC, id ASC)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_last ON sessions(cwd, COALESCE(pinned,0), end_ts_ms DESC, start_ts_ms DESC, id ASC)")
+            cur.execute("CREATE TABLE IF NOT EXISTS reader_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            cur.execute("INSERT OR IGNORE INTO reader_state VALUES ('revision', lower(hex(randomblob(16))))")
             patch_db_for_audit(self.conn)
             try:
                 cur.execute("ALTER TABLE messages ADD COLUMN tool_summary_json TEXT")
@@ -1936,58 +1964,61 @@ class Indexer:
         self.backfill_local_title_overrides()
 
     def scan_sessions(self):
-        if not self.sessions_dir.exists():
-            return
-        session_files = [p for p in self.sessions_dir.rglob("*.jsonl") if self._file_filter_fn(p)]
-        with self.lock:
+        # Enumeration must succeed before a missing path can authorize cache removal.
+        root_stat = self.sessions_dir.stat()
+        if not self.sessions_dir.is_dir():
+            raise ValueError('sessions_directory_required')
+        def fail(error):
+            raise error
+        session_files = []
+        for directory, dirs, files in os.walk(self.sessions_dir, onerror=fail):
+            for name in files:
+                path = Path(directory) / name
+                if path.suffix == ".jsonl" and self._file_filter_fn(path):
+                    session_files.append(path)
+
+        def fingerprint(path):
+            st = path.stat()
+            return json.dumps([st.st_mtime_ns, st.st_ctime_ns, st.st_size,
+                               st.st_dev, st.st_ino]), st.st_mtime
+
+        with self.lock, self.conn:
             existing_rows = self.conn.execute(
-                "SELECT id, file_path, mtime, parser_version, title, pinned, audit_version FROM sessions"
+                "SELECT id, file_path, mtime, parser_version, title, pinned, audit_version, file_signature FROM sessions"
             ).fetchall()
-        existing_by_path = {str(row["file_path"]): row for row in existing_rows}
+            existing_by_path = {str(row["file_path"]): row for row in existing_rows}
 
-        updates = []
-        for path in session_files:
-            try:
-                mtime = path.stat().st_mtime
-            except FileNotFoundError:
-                continue
+            def updates():
+                for path in session_files:
+                    signature, mtime = fingerprint(path)
+                    row = existing_by_path.get(str(path))
+                    if (row and row["file_signature"] == signature
+                            and row["parser_version"] == self.parser_version
+                            and row["audit_version"] == AUDIT_VERSION):
+                        continue
+                    session = self._parse_file_fn(path)
+                    if session is None:
+                        raise ValueError("invalid_session_file: %s" % path)
+                    if self.recall_titles:
+                        custom_title = self.recall_titles.get_custom_title(session["id"])
+                        if (
+                            not custom_title
+                            and row
+                            and row["title"]
+                            and str(row["title"]).strip()
+                            and str(row["title"]).strip() != str(session["title"]).strip()
+                        ):
+                            custom_title = str(row["title"]).strip()
+                            self.recall_titles.set_custom_title(session["id"], custom_title)
+                        if custom_title:
+                            session["title"] = custom_title
 
-            row = existing_by_path.get(str(path))
-            if (
-                row
-                and row["mtime"] is not None
-                and row["mtime"] >= mtime
-                and row["parser_version"] == self.parser_version
-                and row["audit_version"] == AUDIT_VERSION
-            ):
-                continue
+                    yield row, session, mtime, signature, path
 
-            session = self._parse_file_fn(path)
-            if session is None:
-                continue
-
-            if self.recall_titles:
-                custom_title = self.recall_titles.get_custom_title(session["id"])
-                if (
-                    not custom_title
-                    and row
-                    and row["title"]
-                    and str(row["title"]).strip()
-                    and str(row["title"]).strip() != str(session["title"]).strip()
-                ):
-                    custom_title = str(row["title"]).strip()
-                    self.recall_titles.set_custom_title(session["id"], custom_title)
-                if custom_title:
-                    session["title"] = custom_title
-
-            updates.append((row, session, mtime))
-
-        if not updates:
-            return
-
-        with self.lock:
             self._clear_session_preview_cache()
-            for row, session, mtime in updates:
+            changed = False
+            for row, session, mtime, signature, path in updates():
+                changed = True
                 if row and row["id"] != session["id"]:
                     self.conn.execute("DELETE FROM messages WHERE session_id = ?", (row["id"],))
                     self.conn.execute("DELETE FROM sessions WHERE id = ?", (row["id"],))
@@ -2004,8 +2035,8 @@ class Indexer:
                     """
                     INSERT OR REPLACE INTO sessions
                     (id, file_path, start_ts_ms, end_ts_ms, cwd, title, message_count, mtime, search_blob, parser_version, pinned,
-                     tokens_input, tokens_output, tokens_cached, tokens_reasoning, tokens_total)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     tokens_input, tokens_output, tokens_cached, tokens_reasoning, tokens_total, file_signature)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         session["id"],
@@ -2024,6 +2055,7 @@ class Indexer:
                         _usage_int("cached"),
                         _usage_int("reasoning"),
                         _usage_int("total"),
+                        signature,
                     ),
                 )
 
@@ -2083,7 +2115,20 @@ class Indexer:
                         ),
                     )
 
-            self.conn.commit()
+                if fingerprint(path)[0] != signature:
+                    raise ValueError("source_changed_during_refresh: %s" % path)
+
+            final_root_stat = self.sessions_dir.stat()
+            if (root_stat.st_dev, root_stat.st_ino) != (final_root_stat.st_dev, final_root_stat.st_ino):
+                raise ValueError('source_changed_during_refresh')
+            present = {str(path) for path in session_files}
+            for old_path in existing_by_path.keys() - present:
+                changed = True
+                self.conn.execute("DELETE FROM messages WHERE session_id IN (SELECT id FROM sessions WHERE file_path = ?)", (old_path,))
+                self.conn.execute("DELETE FROM sessions WHERE file_path = ?", (old_path,))
+
+            if changed:
+                self.conn.execute("UPDATE reader_state SET value = lower(hex(randomblob(16))) WHERE key = 'revision'")
 
     def backfill_local_title_overrides(self):
         if self._local_title_backfill_done or not self.recall_titles:
@@ -2165,7 +2210,7 @@ class Indexer:
             _strip_audit_raw_json(item)
         return items
 
-    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None, file_path=None):
+    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None, file_path=None, stable_order=False):
         clean_limit, clean_offset = normalize_page_args(limit, offset)
         terms = [t for t in str(q or "").split() if t]
 
@@ -2178,6 +2223,9 @@ class Indexer:
             order_clause = " ORDER BY end_ts_ms DESC, start_ts_ms DESC"
         else:
             order_clause = " ORDER BY start_ts_ms DESC, end_ts_ms DESC"
+
+        if stable_order:
+            order_clause += ", id ASC"
 
         where_sql = " WHERE 1=1"
         args = []
@@ -2901,7 +2949,7 @@ class HermesStateIndexer:
             (session_id,),
         ).fetchone()
 
-    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None, file_path=None):
+    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None, file_path=None, stable_order=False):
         clean_limit, clean_offset = normalize_page_args(limit, offset)
         terms = [t for t in str(q or "").split() if t]
 
@@ -2936,6 +2984,8 @@ class HermesStateIndexer:
             sql += " ORDER BY COALESCE(s.ended_at, s.started_at) DESC, s.started_at DESC"
         else:
             sql += " ORDER BY s.started_at DESC, COALESCE(s.ended_at, s.started_at) DESC"
+        if stable_order:
+            sql += ", s.id ASC"
         sql += " LIMIT ? OFFSET ?"
         args.extend([clean_limit + 1, clean_offset])
 
@@ -3597,7 +3647,7 @@ class OpenCodeIndexer:
         flat = self._load_flat_messages(session_id)
         return len(flat)
 
-    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None, file_path=None):
+    def list_sessions_page(self, q=None, start_ms=None, end_ms=None, limit=DEFAULT_PAGE_LIMIT, offset=0, cwd=None, sort=None, file_path=None, stable_order=False):
         clean_limit, clean_offset = normalize_page_args(limit, offset)
         terms = [t for t in str(q or "").split() if t]
 
@@ -3637,6 +3687,8 @@ class OpenCodeIndexer:
             sql += " ORDER BY s.time_updated DESC, s.time_created DESC"
         else:
             sql += " ORDER BY s.time_created DESC, s.time_updated DESC"
+        if stable_order:
+            sql += ", s.id ASC"
         if not needs_audit_scan:
             sql += " LIMIT ? OFFSET ?"
             args.extend([clean_limit + 1, clean_offset])

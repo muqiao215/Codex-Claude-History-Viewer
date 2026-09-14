@@ -1,5 +1,7 @@
 # Progress
 
+> 2026-09-14 承接说明：当前执行状态以 [History 独立、有界交付计划](../bounded-delivery/task_plan.md) 和 [当前 progress](../bounded-delivery/progress.md) 为准。下文 Current/Remaining/Next 均是原记录时的历史快照；其中 Codex pending 表述不能覆盖后续 CM configured/History adoption 与原生 CLI 的 synthetic 模型端验证。最新证据边界见 [findings](../bounded-delivery/findings.md)。本文件保留原始局部验收，不作为自动推进队列。
+
 ## Current
 
 Codex native-reference is implemented in the real checkout after the prepared patch

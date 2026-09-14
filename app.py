@@ -186,17 +186,31 @@ class SourceBackend:
                 parser_version=parser_version,
                 recall_db_path=recall_db_path,
             )
+        self.last_refresh_error = None
+        self.last_refreshed_at = None
         if self.ensure_fn is None:
-            self.indexer.maybe_update_index(max_age_seconds=0)
+            try:
+                self._refresh_index_once()
+            except (OSError, ValueError, sqlite3.Error):
+                pass
         self._start_background_refresh(run_immediately=self.ensure_fn is not None)
 
     def ensure_ready(self):
         if self.ensure_fn:
             self.ensure_fn()
+        if self.last_refresh_error:
+            raise RuntimeError(self.last_refresh_error)
 
     def _refresh_index_once(self):
-        self.ensure_ready()
-        self.indexer.maybe_update_index(max_age_seconds=0)
+        try:
+            if self.ensure_fn:
+                self.ensure_fn()
+            self.indexer.maybe_update_index(max_age_seconds=0)
+            self.last_refreshed_at = datetime.now(timezone.utc).isoformat()
+            self.last_refresh_error = None
+        except Exception as exc:
+            self.last_refresh_error = type(exc).__name__ + ': source refresh failed'
+            raise
 
     def _background_refresh_loop(self, run_immediately=False):
         if not run_immediately:
@@ -220,11 +234,12 @@ class SourceBackend:
 
 
 class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, directory=None, source_backends=None, wsl_distro=None, runtime_system="windows", audit_config=None, **kwargs):
+    def __init__(self, *args, directory=None, source_backends=None, wsl_distro=None, runtime_system="windows", audit_config=None, demo=False, **kwargs):
         self._source_backends = source_backends or {}
         self._wsl_distro = wsl_distro
         self._runtime_system = str(runtime_system or "windows").strip() or "windows"
         self._audit_config = audit_config or {}
+        self._demo = bool(demo)
         super().__init__(*args, directory=directory, **kwargs)
 
     def _resolve_source_request(self, path):
@@ -301,6 +316,12 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
+        if path == '/api/version':
+            root = Path(__file__).resolve().parent
+            info_path = root / 'BUILD_INFO.json'
+            info = json.loads(info_path.read_text()) if info_path.exists() else {'source_commit': 'unknown'}
+            return self.send_json({'version': (root / 'VERSION').read_text().strip(), 'source_commit': info.get('source_commit', 'unknown')})
+
         if path == "/api/sources":
             return self.handle_sources()
 
@@ -315,6 +336,14 @@ class Handler(SimpleHTTPRequestHandler):
                 except Exception:
                     errors.append({"system": system, "source": source, "error": "source_unavailable"})
             result = workspace(sources)
+            result['demo'] = self._demo
+            result['freshness'] = 'unknown'
+            result['live_task_state'] = 'unknown'
+            result['sources'] = [{'system': system, 'source': source,
+                'status': 'unavailable' if any(e['system'] == system and e['source'] == source for e in errors) else 'readable',
+                'last_refreshed_at': getattr(backend, 'last_refreshed_at', None),
+                'error': getattr(backend, 'last_refresh_error', None)}
+                for (system, source), backend in self._source_backends.items()]
             result["errors"].extend(errors)
             return self.send_json(result)
 
@@ -379,6 +408,9 @@ class Handler(SimpleHTTPRequestHandler):
         backend, source_path = self._resolve_source_request(path)
         if not backend or not source_path:
             return self.send_json({"error": "not found"}, status=404)
+        if source_path == '/cleanup/weak-sessions':
+            return self.send_json({'error': 'automatic_weak_cleanup_disabled',
+                                   'detail': 'Short history is not evidence that a session can be removed.'}, status=405)
         if not self._ensure_backend_ready(backend):
             return
         if source_path == "/briefing":
@@ -422,28 +454,8 @@ class Handler(SimpleHTTPRequestHandler):
                 "backup_dir": backup_dir,
             })
 
-        def _cleanup_weak():
-            project = data.get("project", "").strip() or None
-            try:
-                min_user_messages = int(data.get("min_user_messages", 5))
-            except Exception:
-                min_user_messages = 5
-            ok, detail, deleted_count, backup_dir = backend.indexer.cleanup_weak_sessions(
-                backend.deleted_dir,
-                min_user_messages=min_user_messages,
-                project=project,
-            )
-            return self.send_json({
-                "ok": ok,
-                "detail": detail,
-                "deleted_count": deleted_count,
-                "backup_dir": backup_dir,
-            })
-
         if source_path == "/project/delete":
             return _delete_project()
-        if source_path == "/cleanup/weak-sessions":
-            return _cleanup_weak()
         if source_path.startswith("/session/"):
             if source_path.endswith("/audit/delete"):
                 session_id = self._extract_session_id(source_path, "/audit/delete")
@@ -808,6 +820,8 @@ class Handler(SimpleHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description="Codex + Claude + OpenClaw history viewer")
     parser.add_argument("--version", action="version", version=Path(__file__).with_name("VERSION").read_text().strip())
+    parser.add_argument("--demo", action="store_true", help="Use packaged synthetic data only; disable private source discovery")
+    parser.add_argument("--no-wsl", action="store_true", help="Do not discover or start WSL sources")
     parser.add_argument("--codex-dir", default=os.path.expanduser("~/.codex"))
     parser.add_argument("--claude-dir", default=os.path.expanduser("~/.claude"))
     parser.add_argument("--openclaw-dir", default=os.path.expanduser("~/.openclaw"))
@@ -828,15 +842,25 @@ def main():
     parser.add_argument("--audit-value-threshold", type=int, default=VALUE_SCORE_THRESHOLD, help="Minimum value_score to allow AI audit generation")
     args = parser.parse_args()
 
+    if args.demo:
+        demo_root = Path(__file__).resolve().parent / 'demo'
+        args.codex_dir = str(demo_root / 'codex')
+        args.claude_dir = str(demo_root / 'claude')
+        args.openclaw_dir = str(demo_root / 'openclaw')
+        args.no_wsl = True
     codex_dir = Path(args.codex_dir).expanduser()
     claude_dir = Path(args.claude_dir).expanduser()
     openclaw_dir = Path(args.openclaw_dir).expanduser()
     data_dir = Path(args.data_dir).expanduser() if args.data_dir else Path(__file__).resolve().parent
+    if args.demo:
+        data_dir = data_dir / 'demo-isolated'
     data_dir.mkdir(parents=True, exist_ok=True)
     runtime_system = detect_runtime_system()
     source_backends = {}
 
     def detect_hermes_state_db(explicit_path):
+        if args.demo:
+            return None
         candidates = []
         if explicit_path:
             candidates.append(Path(explicit_path).expanduser())
@@ -853,6 +877,8 @@ def main():
         return None
 
     def detect_opencode_state_db(explicit_path):
+        if args.demo:
+            return None
         candidates = []
         if explicit_path:
             candidates.append(Path(explicit_path).expanduser())
@@ -879,7 +905,7 @@ def main():
     ):
         recall_db_path = None
         if system in ("windows", "linux") and source in ("codex", "claude"):
-            recall_db_path = Path(root_dir).parent / ".recall.db"
+            recall_db_path = data_dir / ("recall_%s_%s.sqlite" % (system, source))
         source_backends[(system, source)] = SourceBackend(
             system=system,
             source=source,
@@ -911,9 +937,10 @@ def main():
         register_source("windows", "codex", codex_dir, codex_dir / "sessions", "index.sqlite", parse_codex_session_file, 5)
         register_source("windows", "claude", claude_dir, claude_dir / "projects", "index_claude.sqlite", parse_claude_session_file, 5, file_filter_fn=claude_filter)
         register_source("windows", "openclaw", openclaw_dir, openclaw_dir / "agents", "index_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter)
-        register_source("wsl", "codex", wsl_codex_dir, wsl_codex_dir / "sessions", "index_wsl_codex.sqlite", parse_codex_session_file, 5, ensure_fn=wsl_bootstrapper.ensure)
-        register_source("wsl", "claude", wsl_claude_dir, wsl_claude_dir / "projects", "index_wsl_claude.sqlite", parse_claude_session_file, 5, file_filter_fn=claude_filter, ensure_fn=wsl_bootstrapper.ensure)
-        register_source("wsl", "openclaw", wsl_openclaw_dir, wsl_openclaw_dir / "agents", "index_wsl_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter, ensure_fn=wsl_bootstrapper.ensure)
+        if not args.no_wsl:
+            register_source("wsl", "codex", wsl_codex_dir, wsl_codex_dir / "sessions", "index_wsl_codex.sqlite", parse_codex_session_file, 5, ensure_fn=wsl_bootstrapper.ensure)
+            register_source("wsl", "claude", wsl_claude_dir, wsl_claude_dir / "projects", "index_wsl_claude.sqlite", parse_claude_session_file, 5, file_filter_fn=claude_filter, ensure_fn=wsl_bootstrapper.ensure)
+            register_source("wsl", "openclaw", wsl_openclaw_dir, wsl_openclaw_dir / "agents", "index_wsl_openclaw.sqlite", parse_openclaw_session_file, 1, file_filter_fn=openclaw_filter, ensure_fn=wsl_bootstrapper.ensure)
     else:
         register_source("linux", "codex", codex_dir, codex_dir / "sessions", "index_linux.sqlite", parse_codex_session_file, 5)
         register_source("linux", "claude", claude_dir, claude_dir / "projects", "index_linux_claude.sqlite", parse_claude_session_file, 5, file_filter_fn=claude_filter)
@@ -965,6 +992,7 @@ def main():
             wsl_distro=args.wsl_distro if runtime_system == "windows" else None,
             runtime_system=runtime_system,
             audit_config=audit_config,
+            demo=args.demo,
             **inner_kwargs,
         )
 

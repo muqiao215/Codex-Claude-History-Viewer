@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -80,6 +81,7 @@ def build_handoff_payload(
     *,
     metadata: Optional[Dict[str, Any]] = None,
     ai_audit: Optional[Dict[str, Any]] = None,
+    provenance: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     metadata = metadata or {}
     ai_audit = ai_audit or {}
@@ -100,13 +102,14 @@ def build_handoff_payload(
             if not path:
                 continue
             changed.append({
-                "path": path,
+                "path": _text(path, 1024),
                 "scope": scope,
                 "edit_count": int(item.get("edit_count") or 0),
                 "write_count": int(item.get("write_count") or 0),
                 "confidence": str(item.get("confidence") or "high"),
             })
 
+    changed = changed[:30]
     verified = []
     seen_commands = set()
     for run in reversed(audit.get("commands") or []):
@@ -147,25 +150,42 @@ def build_handoff_payload(
         if len(evidence_refs) >= 10:
             break
 
-    git_state = _git_state(str(metadata.get("cwd") or ""))
-    dirty_paths = set(git_state.pop("_paths", []))
-    cwd = Path(git_state["root"]) if git_state.get("available") else None
-    touched_dirty = []
-    for item in changed:
-        path = Path(item["path"])
-        try:
-            relative = str(path.relative_to(cwd)) if path.is_absolute() and cwd is not None else str(path)
-        except ValueError:
-            relative = str(path)
-        if relative in dirty_paths:
-            touched_dirty.append(item)
-    if touched_dirty:
-        changed = touched_dirty
-
+    git_state = ({"available": False, "reason": "current_project_state_not_requested"}
+                 if provenance is not None else _git_state(str(metadata.get("cwd") or "")))
+    git_state.pop("_paths", None)
     source = str(audit.get("source") or "")
     session_id = str(audit.get("session_id") or metadata.get("id") or "")
+    observed_at = datetime.now(timezone.utc).isoformat()
+    provenance = dict(provenance or {
+        "status": "unknown", "reason": "source_snapshot_not_supplied",
+        "source": source or "unknown", "session_id": session_id,
+        "content_revision": "unknown", "truncated": False,
+    })
+    provenance.setdefault("observed_at", observed_at)
+    baseline = {"revision": "unknown", "status": "unknown",
+                "reason": "historical_code_revision_not_recorded"}
+    for item in verified:
+        item["baseline"] = dict(baseline)
+        item["classification"] = "historical_command_result"
+        item["current_verification"] = "unknown"
+    for item in evidence_refs:
+        item["source_revision"] = provenance.get("content_revision", "unknown")
     return {
         "version": 1,
+        "provenance_version": "history.handoff.provenance.v1",
+        "authorization": "context_only",
+        "observed_at": observed_at,
+        "provenance": provenance,
+        "project_binding": {"cwd": _text(metadata.get("cwd"), 2048) or None,
+                            "authority": "historical_assertion", "verified": False},
+        "evidence_baseline": baseline,
+        "unknowns": ["historical_code_revision", "current_task_state", "current_authorization"],
+        "failures": {"parse_errors": audit.get("parse_errors", 0),
+                     "observed_error_count": (audit.get("errors") or {}).get("count", 0)},
+        "context": {"bounded": True, "max_changed": 30, "max_evidence": 10,
+                    "source_truncated": bool(provenance.get("truncated"))},
+        "specmesh": {"status": "not_loaded", "authority": "none",
+                     "reason": "optional_project_files_not_selected"},
         "session": f"{source}:{session_id}" if source else session_id,
         "cwd": str(metadata.get("cwd") or ""),
         "goal": goal,
@@ -188,6 +208,11 @@ def render_handoff(payload: Dict[str, Any], detail: str = "standard") -> str:
         "[HANDOFF]",
         f"session: {payload.get('session') or '-'}",
         f"cwd: {payload.get('cwd') or '-'}",
+        "authority: context_only; historical conversation is not authorization",
+        f"source revision: {(payload.get('provenance') or {}).get('content_revision', 'unknown')}",
+        f"source truncated: {bool((payload.get('provenance') or {}).get('truncated'))}",
+        "historical code baseline: unknown; command results are historical evidence",
+        f"parse errors: {(payload.get('failures') or {}).get('parse_errors', 0)}; current task state: unknown",
         f"goal: {_text(payload.get('goal'), 280 if compact else 600) or '-'}",
     ]
     constraints = payload.get("constraints") or []
@@ -245,6 +270,12 @@ def render_handoff(payload: Dict[str, Any], detail: str = "standard") -> str:
         lines.append(f"- git observation: export-time {git_state.get('observed_at') or 'unknown'}; historical verification baseline: unknown")
     elif git_state.get("reason"):
         lines.append(f"- git unavailable: {git_state['reason']}")
+    specmesh = payload.get("specmesh") or {}
+    lines.append("\nspecmesh: " + str(specmesh.get("status") or "not_loaded") + "; unverified candidate context")
+    for plan in (specmesh.get("files") or [])[:3]:
+        lines.append("- " + _text(plan.get("path"), 300))
+        for heading, text in (plan.get("sections") or {}).items():
+            lines.append("  " + _text(heading, 80) + ": " + _text(text, 600))
     return "\n".join(lines)
 
 
@@ -253,8 +284,9 @@ def build_handoff_bundle(
     *,
     metadata: Optional[Dict[str, Any]] = None,
     ai_audit: Optional[Dict[str, Any]] = None,
+    provenance: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    payload = build_handoff_payload(audit, metadata=metadata, ai_audit=ai_audit)
+    payload = build_handoff_payload(audit, metadata=metadata, ai_audit=ai_audit, provenance=provenance)
     return {
         "payload": payload,
         "compact": render_handoff(payload, "compact"),

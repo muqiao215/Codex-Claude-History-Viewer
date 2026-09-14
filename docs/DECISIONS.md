@@ -129,6 +129,8 @@ Cross-project plan search or plan-history diffing becomes a real workflow.
 
 ## 2026-09-06 — Validate the existing product before expanding scope
 
+历史优先级；当前执行方向由下方 2026-09-14 独立交付决定承接。M3 仍未完成，不再作为活动主线。
+
 Decision:
 
 Prioritize independent review of the insight-upgrade fixes, real browser acceptance,
@@ -154,3 +156,20 @@ an extension. Code cleanup needed to fix an observed defect remains within scope
 ## 2026-09-11 — Integrate against existing repository authority
 
 Reuse the existing storage/parsers and keep SpecMesh independently callable. Do not install a second TaskHub from a proposal or equate historical handoff with live completion. The human overview and headless retrieval have separate entry points. See [scope and remaining limits](CODEKIT-INTEGRATION.md). Status: implemented for v1.1.0; broader roadmap gates remain planned.
+
+## 2026-09-14 — History 独立交付与可选原生续接
+
+决定：复用现有 headless CLI/parser/indexer，将只读能力边界、增量可靠性、带来源的交接候选、人的结果优先界面和发布分别验收。机器检索不依赖 Web、CM 或模型；SpecMesh 文件仍保存审查后的项目事实。History 继续提供显式原生 resume command；实际执行由用户选定原生 CLI 或可选 CM 承担，History 不执行 provider 会话。经 CM 的受监督接管、授权和多设备协调归 CM，TaskHub 不成为直接续接或独立发布前置条件。CM 实时状态是可选适配，未连接时 unknown。
+
+原因：用户明确选择三个独立项目和有限任务卡，SpecMesh 第一、History 第二、CM 第三。旧总交接附件的 9 月 11 日表格不是最新事实，已有接口和局部真实续接结果应复用，不能为重排范围全部重做，也不能将局部执行推广为全矩阵完成。
+
+执行边界：本项目 [bounded-delivery](../plans/bounded-delivery/task_plan.md) 当前 queued，只详写 HV-H0.1；一实现者加按需一审查者，最多两轮修正，收口退出，不用 Goal/loop/自动续卡。保留本机主工作区；已授权直接 push 不因本决定增加 worktree/PR 门槛，同仓确需并行才隔离。本次仅规划，不提交/推送/发布。
+
+拒绝：重写已有 parser、同时扩展多种传输/服务、把原生执行迁入 History、建立第二份项目决定库，以及未测量就承诺大日志性能。旧 M3 保留历史未完状态；旧 HV-H3 局部验收保留，但退出本项目五阶段独立分母。
+
+重访条件：已选任务卡的实测证明显式 CLI/refresh 不足，或稳定接口有具体适配缺口时，另选范围明确的后续卡；不能以“将来可能需要”为由启动常驻调度或无限研究。
+
+
+## 2026-09-15 — 显式刷新与原子缓存更新
+
+机器热查返回缓存并标记 freshness unknown；整树可读性检查放在构造/refresh，交接只验证所选文件。逐文件解析写入一个事务，成功才清理消失路径，失败保留原索引。拒绝为了控制内存而分批提交半份结果，也不以后台刷新掩盖时效边界。固定合成基准证明当前方式达到门槛；若跨刷新分页或超大单文件出现明确需求，再单独建立修订/资源边界协议。

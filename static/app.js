@@ -3282,7 +3282,8 @@ function setResultsHeader() {
     deleteProjectSessionsBtn.style.display = showingProjectActions && allowMutations ? "inline-block" : "none";
   }
   if (cleanupWeakSessionsBtn) {
-    cleanupWeakSessionsBtn.style.display = allowMutations ? "inline-block" : "none";
+    cleanupWeakSessionsBtn.style.display = "none";
+    cleanupWeakSessionsBtn.disabled = true;
   }
 
   if (browseMode === "projects" && !currentProject) {
