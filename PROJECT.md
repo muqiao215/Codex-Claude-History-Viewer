@@ -36,17 +36,17 @@ A user can locate and inspect a relevant session quickly, understand its intent,
 
 ## Current State
 
-The stable `v1.1.0` release supports five history sources, existing search/audit/handoff features, usage/briefing/plan views and native OpenCode resume commands. It separates parsers/indexers into `history_core`, exposes an explicit headless CLI, and adds a human work overview. Native source databases remain read-only; Hermes keeps its existing limited audit evidence.
+The stable `v1.2.0` Linux release delivers the public read-only reader, revision-bound pagination, atomic incremental indexing, bounded source-aware handoff and the six-section human workspace. Weak-session cleanup is disabled and demo caches are isolated. Five sources have synthetic read-only coverage; Hermes ordinary audit remains explicitly unsupported.
 
-The v1.1.0 release record reports 191 Python tests, six Node test files and synthetic HTTP/browser checks; these are dated evidence. The current main checkout also includes later OpenCode/Claude/Codex native-reference work. A version string alone does not prove release, installation and running-process alignment. Local runtime state is not continuously verified; see the dated [baseline and limits](plans/bounded-delivery/findings.md). The earlier independent-user M3 trial remains historical unfinished work. CM owns supervised adoption, execution and task state when selected; direct native CLI execution remains available. CM's real continuation matrix does not block History's independent delivery.
+Linux delivery is complete (5/5). Release source is `eb99792dadc46ca2b352be8b56ea16daa2138c6c`; the published archive, local launcher and actual test process identities were verified on 2026-09-15. The process is now stopped; this dated observation is not continuous runtime monitoring. See [release evidence](plans/bounded-delivery/progress.md). Windows/WSL and live model/CM execution are outside this release acceptance. The historical M3 independent-user trial remains unfinished and is not counted as passed.
 
 ## Current Priority
 
-当前排队优先级：独立 SpecMesh 第一，History 第二，CM 第三。History 采用[独立、有界交付计划](plans/bounded-delivery/task_plan.md)：复用 headless 检索，隔离机器只读能力，验证增量可靠性与规模，再收口带来源交接、人的结果优先界面和独立发布。保留显式 resume command，执行由用户选定原生 CLI 或可选 CM 承担；受监督接管矩阵由 CM 验收。当前 CM 事实可选，未连接时明确 unknown。机器只读与增量性能子卡已验收，完整交付收口中。用户现已授权一次性完成 Linux 为主的完整交付；不使用 Goal 或定时续跑。
+用户指定专注 History Viewer、以 Linux 为主。独立交付计划 HV-independent-linux-v2 已完成全部 5 个阶段并发布 v1.2.0；当前无待执行项，后续依据新的具体使用反馈另立任务。不使用 Goal 或定时续跑。
 
 ## Knowledge Map
 
-- Current delivery plan (queued) → [plans/bounded-delivery/](plans/bounded-delivery/)
+- Completed Linux delivery plan → [plans/bounded-delivery/](plans/bounded-delivery/)
 - Earlier Agent handoff implementation and partial evidence → [plans/agent-handoff-service/](plans/agent-handoff-service/)
 - Dated release alignment → [plans/release-alignment/](plans/release-alignment/)
 - Historical product validation / unfinished M3 → [plans/history-viewer-product-validation/](plans/history-viewer-product-validation/)
@@ -61,4 +61,4 @@ The v1.1.0 release record reports 191 Python tests, six Node test files and synt
 
 ## Approved next direction
 
-本项目自行验收和发布；执行细节与冻结分母以 [bounded-delivery](plans/bounded-delivery/task_plan.md) 为准。用户于 2026-09-14 明确开始独立交付；HV-H0.1 与 HV-H1.2 已完成工作树验收，五阶段仍 0/5；增量/合成性能结果及后续阶段缺口见当前计划。既有主工作区和直接 push 授权保留，不强制另建 worktree/PR。
+本项目已自行验收、发布并完成 Linux 本机安装；冻结分母与证据以 [bounded-delivery](plans/bounded-delivery/task_plan.md) 为准，5/5 complete。既有主工作区和直接 push 授权保留，不强制另建 worktree/PR。

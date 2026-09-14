@@ -112,3 +112,7 @@ Codex 更新依据已只读核对 CM 提交 `3596526525c2b74f1e20b09983d8048cb38
 真实浏览器观察：默认 5 条 Codex/Claude 合成记录；6 栏完整；OpenClaw 缺失明确；演示与历史过期明确；跳转 dense 会话 ID 正确。420px/480px 的 scrollWidth 分别 405/465，没有横向溢出。服务停止后重新读取清除旧记录并显示失败。浏览器和测试服务器已关闭。
 
 源码验收 257 Python（256 passed, 1 skipped）、7 Node 文件。Linux 冻结基准 16 项通过，报告在本任务 outputs/linux-delivery-benchmark.json。v1.1.0 缓存升级/回滚均保留四条合成会话；现有缓存与源内容未被 demo 修改。
+
+## 发布收口
+
+Linux v1.2.0 已发布并安装，5/5 complete。源码 eb99792dadc46ca2b352be8b56ea16daa2138c6c、归档摘要、CI 34902276767、本机实际进程、升级和回滚证据均已核对；详见 [progress](progress.md#release-evidence--2026-09-15)。发布后仅更新收尾文档，保留标签与产物身份。
